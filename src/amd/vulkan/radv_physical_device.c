@@ -103,7 +103,14 @@ radv_compute_queue_enabled(const struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
-   return pdev->info.ip[AMD_IP_COMPUTE].num_queues > 0 && !(instance->debug_flags & RADV_DEBUG_NO_COMPUTE_QUEUE);
+   return pdev->info.ip[AMD_IP_COMPUTE].num_queues > 0 &&
+          (!(instance->debug_flags & RADV_DEBUG_NO_COMPUTE_QUEUE) || !pdev->info.has_graphics);
+}
+
+static bool
+radv_graphics_queue_enabled(const struct radv_physical_device *pdev)
+{
+   return pdev->info.ip[AMD_IP_GFX].num_queues > 0;
 }
 
 static bool
@@ -257,11 +264,14 @@ static void
 radv_physical_device_init_queue_table(struct radv_physical_device *pdev)
 {
    int idx = 0;
-   pdev->vk_queue_to_radv[idx] = RADV_QUEUE_GENERAL;
-   idx++;
 
-   for (unsigned i = 1; i < RADV_MAX_QUEUE_FAMILIES; i++)
+   for (unsigned i = 0; i < RADV_MAX_QUEUE_FAMILIES; i++)
       pdev->vk_queue_to_radv[i] = RADV_MAX_QUEUE_FAMILIES + 1;
+
+   if (radv_graphics_queue_enabled(pdev)) {
+      pdev->vk_queue_to_radv[idx] = RADV_QUEUE_GENERAL;
+      idx++;
+   }
 
    if (radv_compute_queue_enabled(pdev)) {
       pdev->vk_queue_to_radv[idx] = RADV_QUEUE_COMPUTE;
@@ -617,7 +627,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_video_decode_queue = pdev->video_decode_enabled,
       .KHR_video_decode_h264 = VIDEO_CODEC_H264DEC && pdev->video_decode_enabled,
       .KHR_video_decode_h265 = VIDEO_CODEC_H265DEC && pdev->video_decode_enabled,
-      .KHR_video_decode_vp9 = (pdev->info.vcn_ip_version >= VCN_2_0_0 &&
+      .KHR_video_decode_vp9 = (radv_video_decode_vp9_supported(pdev) &&
                                VIDEO_CODEC_VP9DEC && pdev->video_decode_enabled),
       .KHR_video_encode_h264 = VIDEO_CODEC_H264ENC && pdev->video_encode_enabled,
       .KHR_video_encode_h265 = VIDEO_CODEC_H265ENC && pdev->video_encode_enabled,
@@ -706,6 +716,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_shader_atomic_float = true,
       .EXT_shader_atomic_float2 = true,
       .EXT_shader_demote_to_helper_invocation = true,
+      .EXT_shader_float8 = pdev->info.gfx_level >= GFX12 && !pdev->use_llvm,
       .EXT_shader_image_atomic_int64 = true,
       .EXT_shader_module_identifier = true,
       .EXT_shader_object = !pdev->use_llvm && !(instance->debug_flags & RADV_DEBUG_NO_ESO),
@@ -1330,6 +1341,10 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       /* VK_KHR_unified_layouts */
       .unifiedImageLayouts = true,
       .unifiedImageLayoutsVideo = true,
+
+      /* VK_EXT_shader_float8 */
+      .shaderFloat8 = true,
+      .shaderFloat8CooperativeMatrix = radv_cooperative_matrix_enabled(pdev),
    };
 }
 
@@ -1686,7 +1701,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .nonStrictSinglePixelWideLinesUseParallelogram = true,
       .nonStrictWideLinesUseParallelogram = true,
       .blockTexelViewCompatibleMultipleLayers = true,
-      .maxCombinedImageSamplerDescriptorCount = 1,
+      .maxCombinedImageSamplerDescriptorCount = 3,
       .fragmentShadingRateClampCombinerInputs = true,
       .defaultRobustnessStorageBuffers = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS,
       .defaultRobustnessUniformBuffers = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS,
@@ -2428,8 +2443,11 @@ static void
 radv_get_physical_device_queue_family_properties(struct radv_physical_device *pdev, uint32_t *pCount,
                                                  VkQueueFamilyProperties **pQueueFamilyProperties)
 {
-   int num_queue_families = 1;
+   int num_queue_families = 0;
    int idx;
+
+   if (radv_graphics_queue_enabled(pdev))
+      num_queue_families++;
 
    if (radv_compute_queue_enabled(pdev))
       num_queue_families++;
@@ -2457,16 +2475,18 @@ radv_get_physical_device_queue_family_properties(struct radv_physical_device *pd
       return;
 
    idx = 0;
-   if (*pCount >= 1) {
-      VkQueueFlags gfx_flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT |
-                               VK_QUEUE_TRANSFER_BIT | VK_QUEUE_SPARSE_BINDING_BIT;
-      *pQueueFamilyProperties[idx] = (VkQueueFamilyProperties){
-         .queueFlags = gfx_flags,
-         .queueCount = 1,
-         .timestampValidBits = 64,
-         .minImageTransferGranularity = (VkExtent3D){1, 1, 1},
-      };
-      idx++;
+   if (radv_graphics_queue_enabled(pdev)) {
+      if (*pCount >= 1) {
+         VkQueueFlags gfx_flags =
+            VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT | VK_QUEUE_SPARSE_BINDING_BIT;
+         *pQueueFamilyProperties[idx] = (VkQueueFamilyProperties){
+            .queueFlags = gfx_flags,
+            .queueCount = 1,
+            .timestampValidBits = 64,
+            .minImageTransferGranularity = (VkExtent3D){1, 1, 1},
+         };
+         idx++;
+      }
    }
 
    if (radv_compute_queue_enabled(pdev)) {
@@ -2892,6 +2912,30 @@ radv_GetPhysicalDeviceCooperativeMatrixPropertiesKHR(VkPhysicalDevice physicalDe
 {
    VK_FROM_HANDLE(radv_physical_device, pdev, physicalDevice);
    VK_OUTARRAY_MAKE_TYPED(VkCooperativeMatrixPropertiesKHR, out, pProperties, pPropertyCount);
+
+   if (pdev->info.gfx_level >= GFX12) {
+      for (unsigned e5m2_a = 0; e5m2_a < 2; e5m2_a++) {
+         for (unsigned e5m2_b = 0; e5m2_b < 2; e5m2_b++) {
+            VkComponentTypeKHR a_type = e5m2_a ? VK_COMPONENT_TYPE_FLOAT8_E5M2_EXT : VK_COMPONENT_TYPE_FLOAT8_E4M3_EXT;
+            VkComponentTypeKHR b_type = e5m2_b ? VK_COMPONENT_TYPE_FLOAT8_E5M2_EXT : VK_COMPONENT_TYPE_FLOAT8_E4M3_EXT;
+
+            vk_outarray_append_typed(VkCooperativeMatrixPropertiesKHR, &out, p)
+            {
+               *p = (struct VkCooperativeMatrixPropertiesKHR){
+                  .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR,
+                  .MSize = 16,
+                  .NSize = 16,
+                  .KSize = 16,
+                  .AType = a_type,
+                  .BType = b_type,
+                  .CType = VK_COMPONENT_TYPE_FLOAT32_KHR,
+                  .ResultType = VK_COMPONENT_TYPE_FLOAT32_KHR,
+                  .saturatingAccumulation = false,
+                  .scope = VK_SCOPE_SUBGROUP_KHR};
+            }
+         }
+      }
+   }
 
    for (unsigned bfloat = 0; bfloat < 2; bfloat++) {
       for (unsigned fp32 = 0; fp32 < 2; fp32++) {

@@ -257,6 +257,8 @@ ir3_lower_bit_size(const nir_instr *instr, UNUSED void *data)
       case nir_op_umin:
       case nir_op_ushr:
          return alu->def.bit_size == 8 ? 16 : 0;
+      case nir_op_bitfield_reverse:
+         return alu->def.bit_size < 32 ? 32 : 0;
       case nir_op_ieq:
       case nir_op_ige:
       case nir_op_ilt:
@@ -567,8 +569,7 @@ lower_shader_clock(struct nir_builder *b, nir_intrinsic_instr *instr, void *data
    nir_push_if(b, nir_elect(b, 1));
    {
       /* ALWAYSON counter is mapped to this address. */
-      nir_def *base_addr =
-         nir_unpack_64_2x32(b, nir_imm_int64(b, uche_trap_base));
+      nir_def *base_addr = nir_imm_int64(b, uche_trap_base);
       /* Reading _LO first presumably latches _HI making the read atomic. */
       nir_def *clock_lo =
          nir_load_global_ir3(b, 1, 32, base_addr, nir_imm_int(b, 0));
@@ -908,6 +909,7 @@ ir3_nir_post_finalize(struct ir3_shader *shader)
          options.lower_vote_trivial = true;
       }
 
+      OPT(s, nir_opt_uniform_subgroup, &options);
       OPT(s, nir_lower_subgroups, &options);
       OPT(s, ir3_nir_lower_shuffle, shader);
    }

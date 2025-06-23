@@ -252,6 +252,42 @@ lookup_ycbcr_conversion(const void *_pipeline_layout, uint32_t set,
    }
 }
 
+static bool
+try_lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
+{
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_load_input_attachment_coord: {
+      b->cursor = nir_before_instr(&intrin->instr);
+
+      nir_variable *pos_var =
+         nir_get_variable_with_location(b->shader, nir_var_shader_in,
+                                        VARYING_SLOT_POS, glsl_vec4_type());
+      nir_def *pos = nir_f2i32(b, nir_load_var(b, pos_var));
+
+      nir_variable *layer_var =
+         nir_get_variable_with_location(b->shader, nir_var_shader_in,
+                                        VARYING_SLOT_LAYER, glsl_int_type());
+      layer_var->data.interpolation = INTERP_MODE_FLAT;
+      nir_def *layer = nir_load_var(b, layer_var);
+
+      nir_def *coord = nir_vec3(b, nir_channel(b, pos, 0),
+                                   nir_channel(b, pos, 1),
+                                   layer);
+      nir_def_replace(&intrin->def, coord);
+      return true;
+   }
+   default:
+      return false;
+   }
+}
+
+static bool
+lower_intrinsics(nir_shader *s)
+{
+   return nir_shader_intrinsics_pass(s, try_lower_intrinsic,
+                                       nir_metadata_control_flow, NULL);
+}
+
 static void
 preprocess_nir(nir_shader *nir)
 {
@@ -273,9 +309,11 @@ preprocess_nir(nir_shader *nir)
       NIR_PASS(_, nir, nir_lower_io_to_vector, nir_var_shader_out);
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, nir_lower_input_attachments,
-                 &(nir_input_attachment_options) {
-                    .use_fragcoord_sysval = false,
-                       });
+               &(nir_input_attachment_options) {
+                  .use_ia_coord_intrin = true,
+               });
+
+      NIR_PASS(_, nir, lower_intrinsics);
    }
 
    NIR_PASS(_, nir, nir_lower_io_to_temporaries,
@@ -949,8 +987,7 @@ shader_debug_output(const char *message, void *data)
 
 static void
 pipeline_populate_v3d_key(struct v3d_key *key,
-                          const struct v3dv_pipeline_stage *p_stage,
-                          uint32_t ucp_enables)
+                          const struct v3dv_pipeline_stage *p_stage)
 {
    assert(p_stage->pipeline->shared_data &&
           p_stage->pipeline->shared_data->maps[p_stage->stage]);
@@ -985,18 +1022,6 @@ pipeline_populate_v3d_key(struct v3d_key *key,
    default:
       unreachable("unsupported shader stage");
    }
-
-   /* Vulkan doesn't have fixed function state for user clip planes. Instead,
-    * shaders can write to gl_ClipDistance[], in which case the SPIR-V compiler
-    * takes care of adding a single compact array variable at
-    * VARYING_SLOT_CLIP_DIST0, so we don't need any user clip plane lowering.
-    *
-    * The only lowering we are interested is specific to the fragment shader,
-    * where we want to emit discards to honor writes to gl_ClipDistance[] in
-    * previous stages. This is done via nir_lower_clip_fs() so we only set up
-    * the ucp enable mask for that stage.
-    */
-   key->ucp_enables = ucp_enables;
 
    const VkPipelineRobustnessBufferBehaviorEXT robust_buffer_enabled =
       VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_EXT;
@@ -1166,7 +1191,19 @@ pipeline_populate_v3d_fs_key(struct v3d_fs_key *key,
    struct v3dv_device *device = p_stage->pipeline->device;
    assert(device);
 
-   pipeline_populate_v3d_key(&key->base, p_stage, ucp_enables);
+   pipeline_populate_v3d_key(&key->base, p_stage);
+
+   /* Vulkan doesn't have fixed function state for user clip planes. Instead,
+    * shaders can write to gl_ClipDistance[], in which case the SPIR-V compiler
+    * takes care of adding a single compact array variable at
+    * VARYING_SLOT_CLIP_DIST0, so we don't need any user clip plane lowering.
+    *
+    * The only lowering we are interested is specific to the fragment shader,
+    * where we want to emit discards to honor writes to gl_ClipDistance[] in
+    * previous stages. This is done via nir_lower_clip_fs() so we only set up
+    * the ucp enable mask for that stage.
+    */
+   key->ucp_enables = ucp_enables;
 
    const VkPipelineInputAssemblyStateCreateInfo *ia_info =
       pCreateInfo->pInputAssemblyState;
@@ -1255,7 +1292,7 @@ pipeline_populate_v3d_gs_key(struct v3d_gs_key *key,
 
    memset(key, 0, sizeof(*key));
 
-   pipeline_populate_v3d_key(&key->base, p_stage, 0);
+   pipeline_populate_v3d_key(&key->base, p_stage);
 
    struct v3dv_pipeline *pipeline = p_stage->pipeline;
 
@@ -1298,7 +1335,7 @@ pipeline_populate_v3d_vs_key(struct v3d_vs_key *key,
    assert(device);
 
    memset(key, 0, sizeof(*key));
-   pipeline_populate_v3d_key(&key->base, p_stage, 0);
+   pipeline_populate_v3d_key(&key->base, p_stage);
 
    struct v3dv_pipeline *pipeline = p_stage->pipeline;
 
@@ -3234,7 +3271,7 @@ pipeline_compile_compute(struct v3dv_pipeline *pipeline,
 
    struct v3d_key key;
    memset(&key, 0, sizeof(key));
-   pipeline_populate_v3d_key(&key, p_stage, 0);
+   pipeline_populate_v3d_key(&key, p_stage);
    pipeline->shared_data->variants[BROADCOM_SHADER_COMPUTE] =
       pipeline_compile_shader_variant(p_stage, &key, sizeof(key),
                                       alloc, &result);

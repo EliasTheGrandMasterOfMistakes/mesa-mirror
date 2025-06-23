@@ -17,18 +17,6 @@
  * as below:
  *
  * Wave32:
- * A&B:
- *         0..15  | 16..31 (lanes)
- * v0 lo:  row 0  | row 4
- * v0 hi:  row 1  | row 5
- * v1 lo:  row 2  | row 6
- * v1 hi:  row 3  | row 7
- * v2 lo:  row 8  | row 12
- * v2 hi:  row 9  | row 13
- * v3 lo:  row 10 | row 14
- * v3 hi:  row 11 | row 15
- *
- * C:
  *         0..15  | 16..31 (lanes)
  * v0 lo:  row 0  | row 8
  * v0 hi:  row 1  | row 9
@@ -40,19 +28,16 @@
  * v3 hi:  row 7  | row 15
  *
  * Wave64:
- * A&B:
- *         0..15 | 16..31 | 32..47 | 48..63 (lanes)
- * v0 lo:  row 0 | row 4  | row 8  | row 12
- * v0 hi:  row 1 | row 5  | row 9  | row 13
- * v1 lo:  row 2 | row 6  | row 10 | row 14
- * v1 hi:  row 3 | row 7  | row 11 | row 15
- *
- * C:
  *         0..15 | 16..31 | 32..47 | 48..63 (lanes)
  * v0 lo:  row 0 | row 8  | row 4  | row 12
  * v0 hi:  row 1 | row 9  | row 5  | row 13
  * v1 lo:  row 2 | row 10 | row 6  | row 14
  * v1 hi:  row 3 | row 11 | row 7  | row 15
+ *
+ * Note that the GFX12 ISA doc describes other layouts for A/B, but they are identical
+ * to the C layout with the exception of the order of the rows (columns for A).
+ * And as long as these are swapped in the same way for both A and B, the muladd
+ * result will be the same. So we use the C layout for all uses.
  */
 
 typedef struct {
@@ -166,13 +151,13 @@ radv_get_base_row(nir_builder *b, struct glsl_cmat_description desc, const lower
    if (params->gfx_level >= GFX12) {
       base_row = nir_udiv_imm(b, local_idx, 16);
 
-      if (desc.use == GLSL_CMAT_USE_ACCUMULATOR && params->wave_size == 64) {
+      if (params->wave_size == 64) {
          /* Switch rows from lanes 16..31 to 32..47, offset right shift by -2
           * to get implicit * 4.
           */
          base_row = nir_ushr_imm(b, nir_bitfield_reverse(b, base_row), 30 - 2);
       } else {
-         base_row = nir_imul_imm(b, base_row, desc.use == GLSL_CMAT_USE_ACCUMULATOR && params->wave_size == 32 ? 8 : 4);
+         base_row = nir_imul_imm(b, base_row, 8);
       }
    } else {
       base_row = desc.use == GLSL_CMAT_USE_ACCUMULATOR ? nir_udiv_imm(b, local_idx, 16) : nir_imm_int(b, 0);
@@ -182,17 +167,35 @@ radv_get_base_row(nir_builder *b, struct glsl_cmat_description desc, const lower
 }
 
 static nir_def *
-convert_base_type(nir_builder *b, nir_def *src, enum glsl_base_type src_type, enum glsl_base_type dst_type)
+convert_base_type(nir_builder *b, nir_def *src, enum glsl_base_type src_type, enum glsl_base_type dst_type, bool sat)
 {
    if (dst_type == src_type)
       return src;
 
    if (src_type == GLSL_TYPE_BFLOAT16) {
       src = nir_bf2f(b, src);
-      return convert_base_type(b, src, GLSL_TYPE_FLOAT, dst_type);
+      return convert_base_type(b, src, GLSL_TYPE_FLOAT, dst_type, sat);
    } else if (dst_type == GLSL_TYPE_BFLOAT16) {
-      src = convert_base_type(b, src, src_type, GLSL_TYPE_FLOAT);
+      src = convert_base_type(b, src, src_type, GLSL_TYPE_FLOAT, sat);
       return nir_f2bf(b, src);
+   } else if (src_type == GLSL_TYPE_FLOAT_E4M3FN) {
+      src = nir_e4m3fn2f(b, src);
+      return convert_base_type(b, src, GLSL_TYPE_FLOAT, dst_type, sat);
+   } else if (dst_type == GLSL_TYPE_FLOAT_E4M3FN) {
+      src = convert_base_type(b, src, src_type, GLSL_TYPE_FLOAT, sat);
+      if (sat)
+         return nir_f2e4m3fn_sat(b, src);
+      else
+         return nir_f2e4m3fn(b, src);
+   } else if (src_type == GLSL_TYPE_FLOAT_E5M2) {
+      src = nir_e5m22f(b, src);
+      return convert_base_type(b, src, GLSL_TYPE_FLOAT, dst_type, sat);
+   } else if (dst_type == GLSL_TYPE_FLOAT_E5M2) {
+      src = convert_base_type(b, src, src_type, GLSL_TYPE_FLOAT, sat);
+      if (sat)
+         return nir_f2e5m2_sat(b, src);
+      else
+         return nir_f2e5m2(b, src);
    }
 
    nir_op op = nir_type_conversion_op(nir_get_nir_type_for_glsl_base_type(src_type),
@@ -328,7 +331,7 @@ radv_nir_lower_cooperative_matrix(nir_shader *shader, enum amd_gfx_level gfx_lev
                   uint32_t row_iter;
 
                   if (gfx_level >= GFX12) {
-                     row_iter = desc.use != GLSL_CMAT_USE_ACCUMULATOR && wave_size == 32 ? i + (i & 4) : i;
+                     row_iter = i;
                   } else {
                      row_iter = i * lanes_per_iter / 16;
                   }
@@ -399,7 +402,7 @@ radv_nir_lower_cooperative_matrix(nir_shader *shader, enum amd_gfx_level gfx_lev
                   uint32_t row_iter;
 
                   if (gfx_level >= GFX12) {
-                     row_iter = desc.use != GLSL_CMAT_USE_ACCUMULATOR && wave_size == 32 ? i + (i & 4) : i;
+                     row_iter = i;
                   } else {
                      row_iter = i * lanes_per_iter / 16;
                   }
@@ -466,6 +469,7 @@ radv_nir_lower_cooperative_matrix(nir_shader *shader, enum amd_gfx_level gfx_lev
                nir_def *src = radv_nir_load_cmat(&b, &params, intr->src[1].ssa);
 
                const nir_cmat_signed cmat_signed_mask = nir_intrinsic_cmat_signed_mask(intr);
+               const bool sat = nir_intrinsic_saturate(intr);
 
                enum glsl_base_type dst_element_type = glsl_apply_signedness_to_base_type(
                   dst_desc.element_type, cmat_signed_mask & NIR_CMAT_RESULT_SIGNED);
@@ -484,7 +488,7 @@ radv_nir_lower_cooperative_matrix(nir_shader *shader, enum amd_gfx_level gfx_lev
                   src = nir_vec(&b, components, src->num_components / scale);
                }
 
-               nir_def *ret = convert_base_type(&b, src, src_element_type, dst_element_type);
+               nir_def *ret = convert_base_type(&b, src, src_element_type, dst_element_type, sat);
 
                if (dst_mul > src_mul) {
                   nir_def *components[NIR_MAX_VEC_COMPONENTS];

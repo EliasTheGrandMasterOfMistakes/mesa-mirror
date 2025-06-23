@@ -225,6 +225,7 @@ hk_populate_fs_key(struct hk_fs_key *key,
 enum hk_feature_key {
    HK_FEAT_MIN_LOD = BITFIELD_BIT(0),
    HK_FEAT_CUSTOM_BORDER = BITFIELD_BIT(1),
+   HK_FEAT_LARGE_POINTS = BITFIELD_BIT(2),
 };
 
 static enum hk_feature_key
@@ -234,7 +235,8 @@ hk_make_feature_key(const struct vk_features *features)
       return ~0U;
 
    return (features->minLod ? HK_FEAT_MIN_LOD : 0) |
-          (features->customBorderColors ? HK_FEAT_CUSTOM_BORDER : 0);
+          (features->customBorderColors ? HK_FEAT_CUSTOM_BORDER : 0) |
+          (features->largePoints ? HK_FEAT_LARGE_POINTS : 0);
 }
 
 static void
@@ -859,20 +861,81 @@ hk_init_link_ht(struct hk_shader *shader, gl_shader_stage sw_stage)
                                       : VK_SUCCESS;
 }
 
+struct fixed_uniforms {
+   unsigned image_heap;
+   unsigned root;
+};
+
+static bool
+lower_uniforms(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_texture_handle_agx &&
+       intr->intrinsic != nir_intrinsic_load_root_agx)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   struct fixed_uniforms *ctx = data;
+   nir_def *rep;
+
+   if (intr->intrinsic == nir_intrinsic_load_texture_handle_agx) {
+      rep = nir_vec2(b, nir_imm_int(b, ctx->image_heap), intr->src[0].ssa);
+   } else {
+      rep = nir_load_preamble(b, 1, 64, .base = ctx->root);
+   }
+
+   nir_def_replace(&intr->def, rep);
+   return true;
+}
+
+static bool
+kill_psiz(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_store_output ||
+       nir_intrinsic_io_semantics(intr).location != VARYING_SLOT_PSIZ)
+      return false;
+
+   return nir_remove_sysval_output(intr, MESA_SHADER_FRAGMENT);
+}
+
+static void
+hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader,
+               enum hk_feature_key features)
+{
+   if (features & HK_FEAT_LARGE_POINTS) {
+      /* Point size must be clamped, excessively large points don't render
+       * properly on G13.
+       *
+       * Must be synced with pointSizeRange.
+       */
+      NIR_PASS(_, nir, nir_lower_point_size, 1.0f, 511.95f);
+
+      /* TODO: Optimize out for monolithic? */
+      NIR_PASS(_, nir, nir_lower_default_point_size);
+   } else {
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, kill_psiz,
+               nir_metadata_control_flow, NULL);
+   }
+
+   NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_out, NULL, NULL);
+   NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
+
+   NIR_PASS(_, nir, agx_nir_lower_uvs, &shader->info.uvs);
+}
+
 static VkResult
 hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                nir_shader *nir, VkShaderCreateFlagsEXT shader_flags,
                const struct vk_pipeline_robustness_state *rs,
-               const struct hk_fs_key *fs_key, struct hk_shader *shader,
-               gl_shader_stage sw_stage, bool hw, nir_xfb_info *xfb_info)
+               const struct hk_fs_key *fs_key, enum hk_feature_key features,
+               struct hk_shader *shader, gl_shader_stage sw_stage, bool hw,
+               nir_xfb_info *xfb_info)
 {
-   unsigned vs_uniform_base = 0;
+   unsigned nr_vbos = 0;
 
    /* For now, only shader objects are supported */
    if (sw_stage == MESA_SHADER_VERTEX) {
-      vs_uniform_base =
-         6 * DIV_ROUND_UP(
-                BITSET_LAST_BIT(shader->info.vs.attrib_components_read), 4);
+      nr_vbos = DIV_ROUND_UP(
+         BITSET_LAST_BIT(shader->info.vs.attrib_components_read), 4);
    } else if (sw_stage == MESA_SHADER_FRAGMENT) {
       shader->info.fs.interp = agx_gather_interp_info(nir);
       shader->info.fs.writes_memory = nir->info.writes_memory;
@@ -921,15 +984,32 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    }
 
    uint64_t outputs = nir->info.outputs_written;
-   if (!hw &&
-       (sw_stage == MESA_SHADER_VERTEX || sw_stage == MESA_SHADER_TESS_EVAL)) {
-      nir->info.stage = MESA_SHADER_COMPUTE;
-      memset(&nir->info.cs, 0, sizeof(nir->info.cs));
-      nir->xfb_info = NULL;
+   if (sw_stage == MESA_SHADER_VERTEX || sw_stage == MESA_SHADER_TESS_EVAL) {
+      if (hw) {
+         hk_lower_hw_vs(nir, shader, features);
+      } else {
+         NIR_PASS(_, nir, agx_nir_lower_vs_before_gs);
+         nir->info.stage = MESA_SHADER_COMPUTE;
+         memset(&nir->info.cs, 0, sizeof(nir->info.cs));
+         nir->xfb_info = NULL;
+      }
    }
 
+   struct fixed_uniforms f = {.root = 0, .image_heap = 4};
+   if (sw_stage == MESA_SHADER_FRAGMENT) {
+      f.image_heap = AGX_ABI_FUNI_COUNT;
+      f.root = AGX_ABI_FUNI_ROOT;
+   } else if (sw_stage == MESA_SHADER_VERTEX) {
+      f.root = AGX_ABI_VUNI_COUNT_VK(nr_vbos);
+      f.image_heap = f.root + 4;
+   }
+
+   shader->info.image_heap_uniform = f.image_heap;
+
    /* XXX: rename */
-   NIR_PASS(_, nir, hk_lower_uvs_index, vs_uniform_base);
+   NIR_PASS(_, nir, hk_lower_uvs_index, nr_vbos);
+   NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_uniforms,
+            nir_metadata_control_flow, &f);
 
 #if 0
    /* TODO */
@@ -941,8 +1021,12 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 #endif
 
    struct agx_shader_key backend_key = {
+      /* the image heap is always the last fixed uniform, so we can start
+       * preamble after that.
+       */
+      .reserved_preamble = f.image_heap + 4,
+
       .dev = agx_gather_device_key(&dev->dev),
-      .reserved_preamble = 128 /* TODO */,
       .no_stop = nir->info.stage == MESA_SHADER_FRAGMENT,
       .has_scratch = !nir->info.internal,
       .promote_constants = true,
@@ -1055,25 +1139,6 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
    vk_shader_free(&dev->vk, pAllocator, &obj->vk);
 }
 
-static void
-hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader)
-{
-   /* Point size must be clamped, excessively large points don't render
-    * properly on G13.
-    *
-    * Must be synced with pointSizeRange.
-    */
-   NIR_PASS(_, nir, nir_lower_point_size, 1.0f, 511.95f);
-
-   /* TODO: Optimize out for monolithic? */
-   NIR_PASS(_, nir, nir_lower_default_point_size);
-
-   NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_out, NULL, NULL);
-   NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
-
-   NIR_PASS(_, nir, agx_nir_lower_uvs, &shader->info.uvs);
-}
-
 VkResult
 hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                   const struct vk_graphics_pipeline_state *state,
@@ -1146,7 +1211,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
          if (!rast_disc) {
             struct hk_shader *shader = &obj->variants[HK_GS_VARIANT_RAST];
 
-            hk_lower_hw_vs(rast, shader);
+            hk_lower_hw_vs(rast, shader, features);
             shader->info.gs = count_variant->info.gs;
          }
 
@@ -1164,9 +1229,10 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
 
          for (unsigned v = 0; v < ARRAY_SIZE(variants); ++v) {
             if (variants[v].in) {
-               result = hk_compile_nir(dev, pAllocator, variants[v].in,
-                                       info->flags, info->robustness, NULL,
-                                       variants[v].out, sw_stage, true, NULL);
+               result =
+                  hk_compile_nir(dev, pAllocator, variants[v].in, info->flags,
+                                 info->robustness, NULL, features,
+                                 variants[v].out, sw_stage, true, NULL);
                if (result != VK_SUCCESS) {
                   hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
                   if (clone != nir) {
@@ -1243,16 +1309,10 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                nir->info.inputs_read >> VERT_ATTRIB_GENERIC0;
          }
 
-         if (hw) {
-            hk_lower_hw_vs(clone, shader);
-         } else {
-            NIR_PASS(_, clone, agx_nir_lower_vs_before_gs);
-         }
-
          /* hk_compile_nir takes ownership of the clone */
          result = hk_compile_nir(dev, pAllocator, clone, info->flags,
-                                 info->robustness, fs_key, shader, sw_stage, hw,
-                                 nir->xfb_info);
+                                 info->robustness, fs_key, features, shader,
+                                 sw_stage, hw, nir->xfb_info);
          if (result != VK_SUCCESS) {
             hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
             ralloc_free(nir);
@@ -1265,7 +1325,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
       /* hk_compile_nir takes ownership of nir */
       result =
          hk_compile_nir(dev, pAllocator, nir, info->flags, info->robustness,
-                        fs_key, shader, sw_stage, true, NULL);
+                        fs_key, features, shader, sw_stage, true, NULL);
       if (result != VK_SUCCESS) {
          hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
          return result;
@@ -1543,6 +1603,7 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
          cfg.cf_binding_count = s->b.cf.nr_bindings;
          cfg.uniform_register_count = main->b.info.push_count;
          cfg.preshader_register_count = main->b.info.nr_preamble_gprs;
+         cfg.texture_state_register_count = 0;
          cfg.sampler_state_register_count =
             agx_translate_sampler_state_count(s->b.uses_txf ? 1 : 0, false);
       }
@@ -1555,7 +1616,13 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
       agx_usc_immediates(&b, &main->b.info.rodata, main->bo->va->addr);
    }
 
-   agx_usc_push_packed(&b, UNIFORM, dev->rodata.image_heap);
+   if (main) {
+      agx_usc_pack(&b, UNIFORM, cfg) {
+         cfg.start_halfs = main->info.image_heap_uniform;
+         cfg.size_halfs = 4;
+         cfg.buffer = dev->rodata.image_heap_ptr;
+      }
+   }
 
    if (s->b.uses_txf)
       agx_usc_push_packed(&b, SAMPLER, dev->dev.txf_sampler);

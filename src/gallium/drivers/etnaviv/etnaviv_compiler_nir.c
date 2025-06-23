@@ -556,6 +556,7 @@ emit_tex(struct etna_compile *c, nir_tex_instr * tex)
          break;
       case nir_tex_src_comparator:
       case nir_tex_src_ddy:
+         assert(!src2);
          src2 = &tex->src[i].src;
          break;
       default:
@@ -565,7 +566,7 @@ emit_tex(struct etna_compile *c, nir_tex_instr * tex)
       }
    }
 
-   etna_emit_tex(c, tex->op, tex->sampler_index, dst_swiz, dst, get_src(c, coord),
+   etna_emit_tex(c, tex, dst_swiz, dst, get_src(c, coord),
                  src1 ? get_src(c, src1) : SRC_DISABLE,
                  src2 ? get_src(c, src2) : SRC_DISABLE);
 }

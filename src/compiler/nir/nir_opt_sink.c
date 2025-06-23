@@ -104,6 +104,7 @@ can_sink_instr(nir_instr *instr, nir_move_options options, bool *can_mov_out_of_
          *can_mov_out_of_loop = false;
          return options & nir_move_load_ubo;
       case nir_intrinsic_load_ssbo:
+      case nir_intrinsic_load_ssbo_intel:
          *can_mov_out_of_loop = false;
          return (options & nir_move_load_ssbo) && nir_intrinsic_can_reorder(intrin);
       case nir_intrinsic_load_input:
@@ -111,7 +112,8 @@ can_sink_instr(nir_instr *instr, nir_move_options options, bool *can_mov_out_of_
       case nir_intrinsic_load_interpolated_input:
       case nir_intrinsic_load_per_vertex_input:
       case nir_intrinsic_load_frag_coord:
-      case nir_intrinsic_load_frag_coord_zw:
+      case nir_intrinsic_load_frag_coord_z:
+      case nir_intrinsic_load_frag_coord_w:
       case nir_intrinsic_load_frag_coord_zw_pan:
       case nir_intrinsic_load_pixel_coord:
       case nir_intrinsic_load_attribute_pan:
@@ -125,6 +127,7 @@ can_sink_instr(nir_instr *instr, nir_move_options options, bool *can_mov_out_of_
          return options & nir_move_copies;
       case nir_intrinsic_load_constant_agx:
       case nir_intrinsic_load_local_pixel_agx:
+      case nir_intrinsic_load_back_face_agx:
       case nir_intrinsic_load_shader_output_pan:
          return true;
       default:

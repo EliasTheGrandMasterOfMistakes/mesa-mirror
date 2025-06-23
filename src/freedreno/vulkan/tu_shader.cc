@@ -742,7 +742,8 @@ lower_inline_ubo(nir_builder *b, nir_intrinsic_instr *intrin, void *cb_data)
       }
       val = nir_load_global_ir3(b, intrin->num_components,
                                 intrin->def.bit_size,
-                                base_addr, nir_ishr_imm(b, offset, 2),
+                                nir_pack_64_2x32(b, base_addr),
+                                nir_ishr_imm(b, offset, 2),
                                 .access =
                                  (enum gl_access_qualifier)(
                                     (enum gl_access_qualifier)(ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER) |
@@ -1337,8 +1338,10 @@ tu6_emit_xs(struct tu_cs *cs,
                .threadsize = thrsz,
                .varying = xs->total_in != 0,
                .lodpixmask = xs->need_full_quad,
-               /* unknown bit, seems unnecessary */
-               .unk24 = true,
+               /* inoutregoverlap had no effect on perf in anholt's testing:
+                * https://gitlab.freedesktop.org/anholt/mesa/-/commits/tu-inout-reg
+                */
+               .inoutregoverlap = true,
                .pixlodenable = xs->need_pixlod,
                .earlypreamble = xs->early_preamble,
                .mergedregs = xs->mergedregs,

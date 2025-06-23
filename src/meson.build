@@ -100,6 +100,13 @@ if with_any_nouveau
   subdir('nouveau')
 endif
 if with_gfxstream_vk
+  dep_virtgpu_kumquat_ffi = null_dep
+  if with_virtgpu_kumquat
+    subdir('util/rust')
+    subdir('virtio/protocols')
+    subdir('virtio/virtgpu_kumquat')
+    subdir('virtio/virtgpu_kumquat_ffi')
+  endif
   subdir('gfxstream')
 endif
 if with_gallium_asahi or with_asahi_vk or with_tools.contains('asahi')
