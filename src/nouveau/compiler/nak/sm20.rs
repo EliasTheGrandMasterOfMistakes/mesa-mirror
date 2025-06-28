@@ -5,9 +5,7 @@ use crate::ir::*;
 use crate::legalize::{
     src_is_reg, swap_srcs_if_not_reg, LegalizeBuildHelpers, LegalizeBuilder,
 };
-use bitview::{
-    BitMutView, BitMutViewable, BitView, BitViewable, SetBit, SetField,
-};
+use bitview::*;
 
 use rustc_hash::FxHashMap;
 use std::fmt;
@@ -251,18 +249,14 @@ impl SM20Encoder<'_> {
         range2: Range<usize>,
         dst: &Dst,
     ) {
-        assert!(range1.len() == 2);
-        assert!(range2.len() == 1);
         let reg = match dst {
             Dst::None => true_reg(),
             Dst::Reg(reg) => *reg,
             _ => panic!("Dst is not pred {dst}"),
         };
         assert!(reg.file() == RegFile::Pred);
-        assert!(reg.base_idx() <= 7);
         assert!(reg.comps() == 1);
-        self.set_field(range1, reg.base_idx() & 0x3);
-        self.set_field(range2, reg.base_idx() >> 2);
+        self.set_field2(range1, range2, reg.base_idx());
     }
 
     fn set_pred(&mut self, pred: &Pred) {
@@ -874,7 +868,7 @@ impl SM20Op for OpFSwz {
                 FSwzShuffle::SwapVertical => 5_u8,
             },
         );
-        e.set_bit(9, false); // .ndv
+        e.set_tex_ndv(9, self.deriv_mode);
 
         for (i, op) in self.ops.iter().enumerate() {
             e.set_field(
@@ -1675,6 +1669,15 @@ impl SM20Encoder<'_> {
         );
     }
 
+    fn set_tex_ndv(&mut self, bit: usize, deriv_mode: TexDerivMode) {
+        let ndv = match deriv_mode {
+            TexDerivMode::Auto => false,
+            TexDerivMode::NonDivergent => true,
+            _ => panic!("{deriv_mode} is not supported"),
+        };
+        self.set_bit(bit, ndv);
+    }
+
     fn set_tex_channel_mask(
         &mut self,
         range: Range<usize>,
@@ -1725,6 +1728,7 @@ impl SM20Op for OpTex {
         assert!(self.fault.is_none());
         e.set_reg_src(20..26, &self.srcs[0]);
         e.set_reg_src(26..32, &self.srcs[1]);
+        e.set_tex_ndv(45, self.deriv_mode);
         e.set_tex_channel_mask(46..50, self.channel_mask);
         e.set_tex_dim(51..54, self.dim);
         e.set_bit(54, self.offset_mode == TexOffsetMode::AddOffI);
@@ -1854,6 +1858,7 @@ impl SM20Op for OpTmml {
         assert!(self.dsts[1].is_none());
         e.set_reg_src(20..26, &self.srcs[0]);
         e.set_reg_src(26..32, &self.srcs[1]);
+        e.set_tex_ndv(45, self.deriv_mode);
         e.set_tex_channel_mask(46..50, self.channel_mask);
         e.set_tex_dim(51..54, self.dim);
     }

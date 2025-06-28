@@ -1930,12 +1930,61 @@ impl TexLodMode {
 impl fmt::Display for TexLodMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TexLodMode::Auto => write!(f, "la"),
-            TexLodMode::Zero => write!(f, "lz"),
-            TexLodMode::Bias => write!(f, "lb"),
-            TexLodMode::Lod => write!(f, "ll"),
-            TexLodMode::Clamp => write!(f, "lc"),
-            TexLodMode::BiasClamp => write!(f, "lb.lc"),
+            TexLodMode::Auto => write!(f, ""),
+            TexLodMode::Zero => write!(f, ".lz"),
+            TexLodMode::Bias => write!(f, ".lb"),
+            TexLodMode::Lod => write!(f, ".ll"),
+            TexLodMode::Clamp => write!(f, ".lc"),
+            TexLodMode::BiasClamp => write!(f, ".lb.lc"),
+        }
+    }
+}
+
+/// Derivative behavior for tex ops and FSwzAdd
+///
+/// The descriptions here may not be wholly accurate as they come from cobbling
+/// together a bunch of pieces.  This is my (Faith's) best understanding of how
+/// these things work.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum TexDerivMode {
+    /// Automatic
+    ///
+    /// For partial (not full) quads, the derivative will default to the value
+    /// of DEFAULT_PARTIAL in SET_SHADER_CONTROL.
+    ///
+    /// On Volta and earlier GPUs or on Blackwell B and later, derivatives in
+    /// all non-fragment shaders stages are assumed to be partial.
+    Auto,
+
+    /// Assume a non-divergent (full) derivative
+    ///
+    /// Partial derivative checks are skipped and the hardware does the
+    /// derivative anyway, possibly on rubbish data.
+    NonDivergent,
+
+    /// Force the derivative to be considered divergent (partial)
+    ///
+    /// This only exists as a separate thing on Blackwell A.  On Hopper and
+    /// earlier, there is a .fdv that's part of the LodMode, but only for
+    /// LodMode::Clamp.  On Blackwell B, it appears (according to the
+    /// disassembler) to be removed again in favor of DerivXY.
+    ForceDivergent,
+
+    /// Attempt an X/Y derivative, ignoring shader stage
+    ///
+    /// This is (I think) identical to Auto except that it ignores the shader
+    /// stage checks.  This is new on Blackwell B+.
+    DerivXY,
+}
+
+impl fmt::Display for TexDerivMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TexDerivMode::Auto => Ok(()),
+            TexDerivMode::NonDivergent => write!(f, ".ndv"),
+            TexDerivMode::ForceDivergent => write!(f, ".fdv"),
+            TexDerivMode::DerivXY => write!(f, ".dxy"),
         }
     }
 }
@@ -2831,6 +2880,7 @@ pub struct OpFSwzAdd {
 
     pub rnd_mode: FRndMode,
     pub ftz: bool,
+    pub deriv_mode: TexDerivMode,
 
     pub ops: [FSwzAddOp; 4],
 }
@@ -2844,6 +2894,7 @@ impl DisplayOp for OpFSwzAdd {
         if self.ftz {
             write!(f, ".ftz")?;
         }
+        write!(f, "{}", self.deriv_mode)?;
         write!(
             f,
             " {} {} [{}, {}, {}, {}]",
@@ -2904,6 +2955,7 @@ pub struct OpFSwz {
 
     pub rnd_mode: FRndMode,
     pub ftz: bool,
+    pub deriv_mode: TexDerivMode,
     pub shuffle: FSwzShuffle,
 
     pub ops: [FSwzAddOp; 4],
@@ -2915,6 +2967,7 @@ impl DisplayOp for OpFSwz {
         if self.rnd_mode != FRndMode::NearestEven {
             write!(f, "{}", self.rnd_mode)?;
         }
+        write!(f, "{}", self.deriv_mode)?;
         if self.ftz {
             write!(f, ".ftz")?;
         }
@@ -5113,6 +5166,7 @@ pub struct OpTex {
 
     pub dim: TexDim,
     pub lod_mode: TexLodMode,
+    pub deriv_mode: TexDerivMode,
     pub z_cmpr: bool,
     pub offset_mode: TexOffsetMode,
     pub mem_eviction_priority: MemEvictionPriority,
@@ -5122,11 +5176,11 @@ pub struct OpTex {
 
 impl DisplayOp for OpTex {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "tex{}", self.dim)?;
-        if self.lod_mode != TexLodMode::Auto {
-            write!(f, ".{}", self.lod_mode)?;
-        }
-        write!(f, "{}", self.offset_mode)?;
+        write!(
+            f,
+            "tex{}{}{}{}",
+            self.dim, self.lod_mode, self.offset_mode, self.deriv_mode
+        )?;
         if self.z_cmpr {
             write!(f, ".dc")?;
         }
@@ -5162,11 +5216,7 @@ pub struct OpTld {
 
 impl DisplayOp for OpTld {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "tld{}", self.dim)?;
-        if self.lod_mode != TexLodMode::Auto {
-            write!(f, ".{}", self.lod_mode)?;
-        }
-        write!(f, "{}", self.offset_mode)?;
+        write!(f, "tld{}{}{}", self.dim, self.lod_mode, self.offset_mode)?;
         if self.is_ms {
             write!(f, ".ms")?;
         }
@@ -5227,13 +5277,14 @@ pub struct OpTmml {
     pub srcs: [Src; 2],
 
     pub dim: TexDim,
+    pub deriv_mode: TexDerivMode,
     pub nodep: bool,
     pub channel_mask: ChannelMask,
 }
 
 impl DisplayOp for OpTmml {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "tmml.lod{}", self.dim)?;
+        write!(f, "tmml.lod{}{}", self.dim, self.deriv_mode)?;
         if self.nodep {
             write!(f, ".nodep")?;
         }
@@ -8777,8 +8828,18 @@ pub trait ShaderModel {
     }
 
     #[allow(dead_code)]
-    fn is_blackwell(&self) -> bool {
+    fn is_blackwell_a(&self) -> bool {
         self.sm() >= 100 && self.sm() < 110
+    }
+
+    #[allow(dead_code)]
+    fn is_blackwell_b(&self) -> bool {
+        self.sm() >= 120 && self.sm() < 130
+    }
+
+    #[allow(dead_code)]
+    fn is_blackwell(&self) -> bool {
+        self.is_blackwell_a() || self.is_blackwell_b()
     }
 
     fn num_regs(&self, file: RegFile) -> u32;

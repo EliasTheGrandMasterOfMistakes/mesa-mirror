@@ -9,7 +9,9 @@
 #include "genxml/cs_builder.h"
 #include "genxml/decode.h"
 
+#include "panvk_buffer.h"
 #include "panvk_cmd_buffer.h"
+#include "panvk_device_memory.h"
 #include "panvk_macros.h"
 #include "panvk_queue.h"
 #include "panvk_utrace.h"
@@ -24,7 +26,7 @@
 #define DEFAULT_CS_TRACEBUF_SIZE (2 * 1024 * 1024)
 
 static void
-finish_render_desc_ringbuf(struct panvk_queue *queue)
+finish_render_desc_ringbuf(struct panvk_gpu_queue *queue)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    struct panvk_instance *instance =
@@ -56,9 +58,7 @@ finish_render_desc_ringbuf(struct panvk_queue *queue)
          pan_kmod_vm_bind(dev->kmod.vm, PAN_KMOD_VM_OP_MODE_IMMEDIATE, &op, 1);
       assert(!ret);
 
-      simple_mtx_lock(&dev->as.lock);
-      util_vma_heap_free(&dev->as.heap, ringbuf->addr.dev, ringbuf->size * 2);
-      simple_mtx_unlock(&dev->as.lock);
+      panvk_as_free(dev, ringbuf->addr.dev, ringbuf->size * 2);
    }
 
    if (ringbuf->addr.host) {
@@ -71,7 +71,7 @@ finish_render_desc_ringbuf(struct panvk_queue *queue)
 }
 
 static VkResult
-init_render_desc_ringbuf(struct panvk_queue *queue)
+init_render_desc_ringbuf(struct panvk_gpu_queue *queue)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    struct panvk_instance *instance =
@@ -110,10 +110,7 @@ init_render_desc_ringbuf(struct panvk_queue *queue)
    /* We choose the alignment to guarantee that we won't ever cross a 4G
     * boundary when accessing the mapping. This way we can encode the wraparound
     * using 32-bit operations. */
-   simple_mtx_lock(&dev->as.lock);
-   dev_addr =
-      util_vma_heap_alloc(&dev->as.heap, ringbuf->size * 2, ringbuf->size * 2);
-   simple_mtx_unlock(&dev->as.lock);
+   dev_addr = panvk_as_alloc(dev, ringbuf->size * 2, ringbuf->size * 2);
 
    if (!dev_addr)
       return panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
@@ -149,9 +146,7 @@ init_render_desc_ringbuf(struct panvk_queue *queue)
    ret = pan_kmod_vm_bind(dev->kmod.vm, PAN_KMOD_VM_OP_MODE_IMMEDIATE, vm_ops,
                           tracing_enabled ? 1 : ARRAY_SIZE(vm_ops));
    if (ret) {
-      simple_mtx_lock(&dev->as.lock);
-      util_vma_heap_free(&dev->as.heap, dev_addr, ringbuf->size * 2);
-      simple_mtx_unlock(&dev->as.lock);
+      panvk_as_free(dev, dev_addr, ringbuf->size * 2);
       return panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
                           "Failed to GPU map ringbuf BO");
    }
@@ -188,7 +183,7 @@ init_render_desc_ringbuf(struct panvk_queue *queue)
 }
 
 static void
-finish_subqueue_tracing(struct panvk_queue *queue,
+finish_subqueue_tracing(struct panvk_gpu_queue *queue,
                         enum panvk_subqueue_id subqueue)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
@@ -212,10 +207,8 @@ finish_subqueue_tracing(struct panvk_queue *queue,
          pan_kmod_vm_bind(dev->kmod.vm, PAN_KMOD_VM_OP_MODE_IMMEDIATE, &op, 1);
       assert(!ret);
 
-      simple_mtx_lock(&dev->as.lock);
-      util_vma_heap_free(&dev->as.heap, subq->tracebuf.addr.dev,
+      panvk_as_free(dev, subq->tracebuf.addr.dev,
                          subq->tracebuf.size + pgsize);
-      simple_mtx_unlock(&dev->as.lock);
    }
 
    if (subq->tracebuf.addr.host) {
@@ -230,7 +223,7 @@ finish_subqueue_tracing(struct panvk_queue *queue,
 }
 
 static VkResult
-init_subqueue_tracing(struct panvk_queue *queue,
+init_subqueue_tracing(struct panvk_gpu_queue *queue,
                       enum panvk_subqueue_id subqueue)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
@@ -273,10 +266,7 @@ init_subqueue_tracing(struct panvk_queue *queue,
 
    /* Add a guard page. */
    size_t pgsize = getpagesize();
-   simple_mtx_lock(&dev->as.lock);
-   dev_addr =
-      util_vma_heap_alloc(&dev->as.heap, subq->tracebuf.size + pgsize, pgsize);
-   simple_mtx_unlock(&dev->as.lock);
+   dev_addr = panvk_as_alloc(dev, subq->tracebuf.size + pgsize, pgsize);
 
    if (!dev_addr)
       return panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
@@ -299,9 +289,7 @@ init_subqueue_tracing(struct panvk_queue *queue,
    int ret =
       pan_kmod_vm_bind(dev->kmod.vm, PAN_KMOD_VM_OP_MODE_IMMEDIATE, &vm_op, 1);
    if (ret) {
-      simple_mtx_lock(&dev->as.lock);
-      util_vma_heap_free(&dev->as.heap, dev_addr, subq->tracebuf.size + pgsize);
-      simple_mtx_unlock(&dev->as.lock);
+      panvk_as_free(dev, dev_addr, subq->tracebuf.size + pgsize);
       return panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
                           "Failed to GPU map ringbuf BO");
    }
@@ -318,7 +306,7 @@ init_subqueue_tracing(struct panvk_queue *queue,
 }
 
 static void
-finish_subqueue(struct panvk_queue *queue, enum panvk_subqueue_id subqueue)
+finish_subqueue(struct panvk_gpu_queue *queue, enum panvk_subqueue_id subqueue)
 {
    panvk_pool_free_mem(&queue->subqueues[subqueue].context);
    panvk_pool_free_mem(&queue->subqueues[subqueue].regs_save);
@@ -326,7 +314,7 @@ finish_subqueue(struct panvk_queue *queue, enum panvk_subqueue_id subqueue)
 }
 
 static VkResult
-init_utrace(struct panvk_queue *queue)
+init_utrace(struct panvk_gpu_queue *queue)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    const struct panvk_physical_device *phys_dev =
@@ -348,7 +336,7 @@ init_utrace(struct panvk_queue *queue)
 }
 
 static VkResult
-init_subqueue(struct panvk_queue *queue, enum panvk_subqueue_id subqueue)
+init_subqueue(struct panvk_gpu_queue *queue, enum panvk_subqueue_id subqueue)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    struct panvk_subqueue *subq = &queue->subqueues[subqueue];
@@ -529,7 +517,7 @@ init_subqueue(struct panvk_queue *queue, enum panvk_subqueue_id subqueue)
 }
 
 static void
-cleanup_queue(struct panvk_queue *queue)
+cleanup_queue(struct panvk_gpu_queue *queue)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
 
@@ -546,7 +534,7 @@ cleanup_queue(struct panvk_queue *queue)
 }
 
 static VkResult
-init_queue(struct panvk_queue *queue)
+init_queue(struct panvk_gpu_queue *queue)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    struct panvk_instance *instance =
@@ -602,7 +590,7 @@ err_cleanup_queue:
 }
 
 static VkResult
-create_group(struct panvk_queue *queue,
+create_group(struct panvk_gpu_queue *queue,
              enum drm_panthor_group_priority group_priority)
 {
    const struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
@@ -649,7 +637,7 @@ create_group(struct panvk_queue *queue,
 }
 
 static void
-destroy_group(struct panvk_queue *queue)
+destroy_group(struct panvk_gpu_queue *queue)
 {
    const struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    struct drm_panthor_group_destroy gd = {
@@ -662,7 +650,7 @@ destroy_group(struct panvk_queue *queue)
 }
 
 static VkResult
-init_tiler(struct panvk_queue *queue)
+init_tiler(struct panvk_gpu_queue *queue)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    const struct panvk_physical_device *phys_dev =
@@ -722,7 +710,7 @@ err_free_desc:
 }
 
 static void
-cleanup_tiler(struct panvk_queue *queue)
+cleanup_tiler(struct panvk_gpu_queue *queue)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    struct panvk_tiler_heap *tiler_heap = &queue->tiler_heap;
@@ -740,7 +728,7 @@ struct panvk_queue_submit {
    const struct panvk_instance *instance;
    const struct panvk_physical_device *phys_dev;
    struct panvk_device *dev;
-   struct panvk_queue *queue;
+   struct panvk_gpu_queue *queue;
 
    bool process_utrace;
    bool force_sync;
@@ -782,7 +770,7 @@ panvk_queue_submit_init(struct panvk_queue_submit *submit,
       .instance = to_panvk_instance(vk_dev->physical->instance),
       .phys_dev = to_panvk_physical_device(vk_dev->physical),
       .dev = to_panvk_device(vk_dev),
-      .queue = container_of(vk_queue, struct panvk_queue, vk),
+      .queue = container_of(vk_queue, struct panvk_gpu_queue, vk),
    };
 
    submit->process_utrace =
@@ -1027,7 +1015,7 @@ static void
 panvk_queue_submit_init_signals(struct panvk_queue_submit *submit,
                                 const struct vk_queue_submit *vk_submit)
 {
-   struct panvk_queue *queue = submit->queue;
+   struct panvk_gpu_queue *queue = submit->queue;
 
    if (!submit->needs_signals)
       return;
@@ -1062,7 +1050,7 @@ panvk_queue_submit_ioctl(struct panvk_queue_submit *submit)
 {
    const struct panvk_device *dev = submit->dev;
    const struct panvk_instance *instance = submit->instance;
-   struct panvk_queue *queue = submit->queue;
+   struct panvk_gpu_queue *queue = submit->queue;
    int ret;
 
    if (instance->debug_flags & PANVK_DEBUG_TRACE) {
@@ -1100,7 +1088,7 @@ panvk_queue_submit_process_signals(struct panvk_queue_submit *submit,
                                    const struct vk_queue_submit *vk_submit)
 {
    struct panvk_device *dev = submit->dev;
-   struct panvk_queue *queue = submit->queue;
+   struct panvk_gpu_queue *queue = submit->queue;
    int ret;
 
    if (!submit->needs_signals)
@@ -1143,7 +1131,7 @@ static void
 panvk_queue_submit_process_debug(const struct panvk_queue_submit *submit)
 {
    const struct panvk_instance *instance = submit->instance;
-   struct panvk_queue *queue = submit->queue;
+   struct panvk_gpu_queue *queue = submit->queue;
    struct pandecode_context *decode_ctx = submit->dev->debug.decode_ctx;
 
    if (instance->debug_flags & PANVK_DEBUG_TRACE) {
@@ -1213,8 +1201,8 @@ panvk_queue_submit_process_debug(const struct panvk_queue_submit *submit)
    }
 }
 
-static VkResult
-panvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *vk_submit)
+VkResult
+panvk_per_arch(gpu_queue_submit)(struct vk_queue *vk_queue, struct vk_queue_submit *vk_submit)
 {
    struct panvk_queue_submit_stack_storage stack_storage;
    struct panvk_queue_submit submit;
@@ -1267,12 +1255,20 @@ get_panthor_group_priority(const VkDeviceQueueCreateInfo *create_info)
 }
 
 VkResult
-panvk_per_arch(queue_init)(struct panvk_device *dev, struct panvk_queue *queue,
-                           int idx, const VkDeviceQueueCreateInfo *create_info)
+panvk_per_arch(create_gpu_queue)(struct panvk_device *dev,
+                                 const VkDeviceQueueCreateInfo *create_info,
+                                 uint32_t queue_idx,
+                                 struct vk_queue **out_queue)
 {
-   VkResult result = vk_queue_init(&queue->vk, &dev->vk, create_info, idx);
+   struct panvk_gpu_queue *queue = vk_zalloc(&dev->vk.alloc, sizeof(*queue), 8,
+                                         VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   if (!queue)
+      return panvk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   VkResult result =
+      vk_queue_init(&queue->vk, &dev->vk, create_info, queue_idx);
    if (result != VK_SUCCESS)
-      return result;
+      goto err_free_queue;
 
    int ret = drmSyncobjCreate(dev->drm_fd, 0, &queue->syncobj_handle);
    if (ret) {
@@ -1293,7 +1289,8 @@ panvk_per_arch(queue_init)(struct panvk_device *dev, struct panvk_queue *queue,
    if (result != VK_SUCCESS)
       goto err_destroy_group;
 
-   queue->vk.driver_submit = panvk_queue_submit;
+   queue->vk.driver_submit = panvk_per_arch(gpu_queue_submit);
+   *out_queue = &queue->vk;
    return VK_SUCCESS;
 
 err_destroy_group:
@@ -1307,12 +1304,16 @@ err_destroy_syncobj:
 
 err_finish_queue:
    vk_queue_finish(&queue->vk);
+
+err_free_queue:
+   vk_free(&dev->vk.alloc, queue);
    return result;
 }
 
 void
-panvk_per_arch(queue_finish)(struct panvk_queue *queue)
+panvk_per_arch(destroy_gpu_queue)(struct vk_queue *vk_queue)
 {
+   struct panvk_gpu_queue *queue = container_of(vk_queue, struct panvk_gpu_queue, vk);
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
 
    cleanup_queue(queue);
@@ -1320,11 +1321,13 @@ panvk_per_arch(queue_finish)(struct panvk_queue *queue)
    cleanup_tiler(queue);
    drmSyncobjDestroy(dev->drm_fd, queue->syncobj_handle);
    vk_queue_finish(&queue->vk);
+   vk_free(&dev->vk.alloc, queue);
 }
 
 VkResult
-panvk_per_arch(queue_check_status)(struct panvk_queue *queue)
+panvk_per_arch(gpu_queue_check_status)(struct vk_queue *vk_queue)
 {
+   struct panvk_gpu_queue *queue = container_of(vk_queue, struct panvk_gpu_queue, vk);
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    struct drm_panthor_group_get_state state = {
       .group_handle = queue->group_handle,

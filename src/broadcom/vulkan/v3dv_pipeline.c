@@ -306,7 +306,7 @@ preprocess_nir(nir_shader *nir)
    NIR_PASS(_, nir, nir_lower_variable_initializers, nir_var_shader_out);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
-      NIR_PASS(_, nir, nir_lower_io_to_vector, nir_var_shader_out);
+      NIR_PASS(_, nir, nir_opt_vectorize_io_vars, nir_var_shader_out);
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, nir_lower_input_attachments,
                &(nir_input_attachment_options) {
@@ -316,7 +316,7 @@ preprocess_nir(nir_shader *nir)
       NIR_PASS(_, nir, lower_intrinsics);
    }
 
-   NIR_PASS(_, nir, nir_lower_io_to_temporaries,
+   NIR_PASS(_, nir, nir_lower_io_vars_to_temporaries,
             nir_shader_get_entrypoint(nir), true, false);
 
    NIR_PASS(_, nir, nir_lower_system_values);
@@ -933,7 +933,7 @@ static void
 lower_fs_io(nir_shader *nir)
 {
    /* Our backend doesn't handle array fragment shader outputs */
-   NIR_PASS(_, nir, nir_lower_io_arrays_to_elements_no_indirects, false);
+   NIR_PASS(_, nir, nir_lower_io_array_vars_to_elements_no_indirects, false);
    NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_shader_out, NULL);
 
    nir_assign_io_var_locations(nir, nir_var_shader_in, &nir->num_inputs,
@@ -949,7 +949,7 @@ lower_fs_io(nir_shader *nir)
 static void
 lower_gs_io(struct nir_shader *nir)
 {
-   NIR_PASS(_, nir, nir_lower_io_arrays_to_elements_no_indirects, false);
+   NIR_PASS(_, nir, nir_lower_io_array_vars_to_elements_no_indirects, false);
 
    nir_assign_io_var_locations(nir, nir_var_shader_in, &nir->num_inputs,
                                MESA_SHADER_GEOMETRY);
@@ -961,7 +961,7 @@ lower_gs_io(struct nir_shader *nir)
 static void
 lower_vs_io(struct nir_shader *nir)
 {
-   NIR_PASS(_, nir, nir_lower_io_arrays_to_elements_no_indirects, false);
+   NIR_PASS(_, nir, nir_lower_io_array_vars_to_elements_no_indirects, false);
 
    nir_assign_io_var_locations(nir, nir_var_shader_in, &nir->num_inputs,
                                MESA_SHADER_VERTEX);
@@ -1744,11 +1744,11 @@ link_shaders(nir_shader *producer, nir_shader *consumer)
    assert(consumer);
 
    if (producer->options->lower_to_scalar) {
-      NIR_PASS(_, producer, nir_lower_io_to_scalar_early, nir_var_shader_out);
-      NIR_PASS(_, consumer, nir_lower_io_to_scalar_early, nir_var_shader_in);
+      NIR_PASS(_, producer, nir_lower_io_vars_to_scalar, nir_var_shader_out);
+      NIR_PASS(_, consumer, nir_lower_io_vars_to_scalar, nir_var_shader_in);
    }
 
-   nir_lower_io_arrays_to_elements(producer, consumer);
+   nir_lower_io_array_vars_to_elements(producer, consumer);
 
    v3d_optimize_nir(NULL, producer);
    v3d_optimize_nir(NULL, consumer);

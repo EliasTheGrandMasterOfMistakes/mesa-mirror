@@ -169,11 +169,11 @@ void
 tu_cs_image_ref_2d(struct tu_cs *cs, const struct fdl6_view *iview, uint32_t layer, bool src)
 {
    tu_cs_emit_qw(cs, iview->base_addr + iview->layer_size * layer);
-   /* SP_PS_2D_SRC_PITCH has shifted pitch field */
+   /* TPL1_A2D_SRC_TEXTURE_PITCH has shifted pitch field */
    if (src)
-      tu_cs_emit(cs, SP_PS_2D_SRC_PITCH(CHIP, .pitch = iview->pitch).value);
+      tu_cs_emit(cs, TPL1_A2D_SRC_TEXTURE_PITCH(CHIP, .pitch = iview->pitch).value);
    else
-      tu_cs_emit(cs, A6XX_RB_2D_DST_PITCH(iview->pitch).value);
+      tu_cs_emit(cs, A6XX_RB_A2D_DEST_BUFFER_PITCH(iview->pitch).value);
 }
 TU_GENX(tu_cs_image_ref_2d);
 
@@ -385,7 +385,7 @@ ubwc_possible(struct tu_device *device,
     * and we can't change the descriptor so we can't do this.
     */
    if (((usage | stencil_usage) & VK_IMAGE_USAGE_STORAGE_BIT) &&
-       !info->a7xx.supports_ibo_ubwc) {
+       !info->a7xx.supports_uav_ubwc) {
       return false;
    }
 

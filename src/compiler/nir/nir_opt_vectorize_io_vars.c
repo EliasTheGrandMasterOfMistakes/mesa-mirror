@@ -26,11 +26,11 @@
 #include "nir_builder.h"
 #include "nir_deref.h"
 
-/** @file nir_lower_io_to_vector.c
+/** @file nir_opt_vectorize_io_vars.c
  *
  * Merges compatible input/output variables residing in different components
  * of the same location. It's expected that further passes such as
- * nir_lower_io_to_temporaries will combine loads and stores of the merged
+ * nir_lower_io_vars_to_temporaries will combine loads and stores of the merged
  * variables, producing vector nir_load_input/nir_store_output instructions
  * when all is said and done.
  */
@@ -390,7 +390,7 @@ build_array_deref_of_new_var_flat(nir_shader *shader,
 }
 
 static bool
-nir_lower_io_to_vector_impl(nir_function_impl *impl, nir_variable_mode modes)
+nir_opt_vectorize_io_vars_impl(nir_function_impl *impl, nir_variable_mode modes)
 {
    assert(!(modes & ~(nir_var_shader_in | nir_var_shader_out)));
 
@@ -436,7 +436,7 @@ nir_lower_io_to_vector_impl(nir_function_impl *impl, nir_variable_mode modes)
    /* Actually lower all the IO load/store intrinsics.  Load instructions are
     * lowered to a vector load and an ALU instruction to grab the channels we
     * want.  Outputs are lowered to a write-masked store of the vector output.
-    * For non-TCS outputs, we then run nir_lower_io_to_temporaries at the end
+    * For non-TCS outputs, we then run nir_lower_io_vars_to_temporaries at the end
     * to clean up the partial writes.
     */
    nir_foreach_block(block, impl) {
@@ -567,7 +567,7 @@ nir_lower_io_to_vector_impl(nir_function_impl *impl, nir_variable_mode modes)
    }
 
    /* Demote the old var to a global, so that things like
-    * nir_lower_io_to_temporaries() don't trigger on it.
+    * nir_lower_io_vars_to_temporaries() don't trigger on it.
     */
    util_dynarray_foreach(&demote_vars, nir_variable *, varp) {
       (*varp)->data.mode = nir_var_shader_temp;
@@ -579,12 +579,12 @@ nir_lower_io_to_vector_impl(nir_function_impl *impl, nir_variable_mode modes)
 }
 
 bool
-nir_lower_io_to_vector(nir_shader *shader, nir_variable_mode modes)
+nir_opt_vectorize_io_vars(nir_shader *shader, nir_variable_mode modes)
 {
    bool progress = false;
 
    nir_foreach_function_impl(impl, shader) {
-      progress |= nir_lower_io_to_vector_impl(impl, modes);
+      progress |= nir_opt_vectorize_io_vars_impl(impl, modes);
    }
 
    return progress;
@@ -601,7 +601,7 @@ is_tess_level_variable(nir_variable *var)
  * can be combined by nir_opt_cse()/nir_opt_combine_stores().
  */
 bool
-nir_vectorize_tess_levels(nir_shader *shader)
+nir_lower_tess_level_array_vars_to_vec(nir_shader *shader)
 {
    nir_variable_mode mode;
    if (shader->info.stage == MESA_SHADER_TESS_CTRL)

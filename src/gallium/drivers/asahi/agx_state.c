@@ -2767,7 +2767,7 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
 
       if (!(ctx->stage[stage].image_mask & BITFIELD_BIT(i))) {
          agx_set_null_texture(texture);
-         agx_set_null_pbe(pbe, agx_pool_alloc_aligned(&batch->pool, 1, 64).gpu);
+         agx_set_null_pbe(pbe);
          continue;
       }
 
@@ -3870,14 +3870,14 @@ agx_ia_update(struct agx_batch *batch, const struct pipe_draw_info *info,
 
    /* With a geometry/tessellation shader, clipper counters are written by the
     * pre-GS/tess prefix sum kernel since they depend on the output on the
-    * geometry/tessellation shader.  Without a geometry/tessellation shader,
+    * geometry/tessellation shader. Without a geometry/tessellation shader,
     * they are written along with IA.
     */
    if (ctx->stage[PIPE_SHADER_GEOMETRY].shader ||
        ctx->stage[PIPE_SHADER_TESS_EVAL].shader) {
 
-      c_prims = 0;
-      c_invs = 0;
+      c_prims = AGX_SCRATCH_PAGE_ADDRESS;
+      c_invs = AGX_SCRATCH_PAGE_ADDRESS;
    }
 
    if (info->primitive_restart) {
@@ -3945,6 +3945,8 @@ agx_batch_geometry_params(struct agx_batch *batch, uint64_t input_index_buffer,
       .flat_outputs =
          batch->ctx->stage[PIPE_SHADER_FRAGMENT].shader->info.inputs_flat_shaded,
       .input_topology = info->mode,
+      .xfb_offs_ptrs = {AGX_ZERO_PAGE_ADDRESS, AGX_ZERO_PAGE_ADDRESS,
+                        AGX_ZERO_PAGE_ADDRESS, AGX_ZERO_PAGE_ADDRESS},
    };
 
    for (unsigned i = 0; i < ARRAY_SIZE(batch->ctx->streamout.targets); ++i) {
@@ -3960,8 +3962,6 @@ agx_batch_geometry_params(struct agx_batch *batch, uint64_t input_index_buffer,
          params.xfb_offs_ptrs[i] = rsrc->bo->va->addr;
          agx_batch_writes(batch, rsrc, 0);
          batch->incoherent_writes = true;
-      } else {
-         params.xfb_offs_ptrs[i] = 0;
       }
    }
 
@@ -3983,6 +3983,12 @@ agx_batch_geometry_params(struct agx_batch *batch, uint64_t input_index_buffer,
 
       params.xfb_any_overflow =
          agx_get_query_address(batch, batch->ctx->tf_any_overflow);
+   } else {
+      for (unsigned i = 0; i < ARRAY_SIZE(batch->ctx->tf_overflow); ++i) {
+         params.xfb_overflow[i] = AGX_SCRATCH_PAGE_ADDRESS;
+      }
+
+      params.xfb_any_overflow = AGX_SCRATCH_PAGE_ADDRESS;
    }
 
    /* Calculate input primitive count for direct draws, and allocate the vertex
@@ -4711,8 +4717,8 @@ agx_draw_patches(struct agx_context *ctx, const struct pipe_draw_info *info,
     * Otherwise, we do when tessellating.
     */
    if (ctx->stage[PIPE_SHADER_GEOMETRY].shader) {
-      c_prims = 0;
-      c_invs = 0;
+      c_prims = AGX_SCRATCH_PAGE_ADDRESS;
+      c_invs = AGX_SCRATCH_PAGE_ADDRESS;
    }
 
    /* Generate counts, then prefix sum them, then finally tessellate. */

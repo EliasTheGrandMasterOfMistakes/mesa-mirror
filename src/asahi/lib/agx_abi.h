@@ -56,3 +56,6 @@
  * robustness optimization even without soft fault.
  */
 #define AGX_ZERO_PAGE_ADDRESS (((uint64_t)1) << 32)
+#define AGX_ZERO_PAGE_SIZE    (16384)
+
+#define AGX_SCRATCH_PAGE_ADDRESS (AGX_ZERO_PAGE_ADDRESS + AGX_ZERO_PAGE_SIZE)

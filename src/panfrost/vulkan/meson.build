@@ -76,9 +76,8 @@ jm_files = [
   'jm/panvk_vX_cmd_event.c',
   'jm/panvk_vX_cmd_query.c',
   'jm/panvk_vX_cmd_precomp.c',
-  'jm/panvk_vX_device.c',
   'jm/panvk_vX_event.c',
-  'jm/panvk_vX_queue.c',
+  'jm/panvk_vX_gpu_queue.c',
 ]
 
 csf_archs = [10, 12, 13]
@@ -90,10 +89,9 @@ csf_files = [
   'csf/panvk_vX_cmd_event.c',
   'csf/panvk_vX_cmd_query.c',
   'csf/panvk_vX_cmd_precomp.c',
-  'csf/panvk_vX_device.c',
   'csf/panvk_vX_event.c',
   'csf/panvk_vX_exception_handler.c',
-  'csf/panvk_vX_queue.c',
+  'csf/panvk_vX_gpu_queue.c',
   'csf/panvk_vX_utrace.c',
 ]
 

@@ -1877,6 +1877,17 @@ impl<'a> ShaderFromNir<'a> {
                 _ => panic!("Invalid LOD mode"),
             };
 
+            // Starting with Blackwell B, the shader stage check for derivatives
+            // is back to defaulting to disabled on compute and instead we have
+            // a new derivative mode to re-enable it.  If tex_lod_mode == Zero,
+            // there is no implicit derivative so this doesn't matter.
+            let deriv_mode =
+                if self.sm.sm() >= 120 && lod_mode != TexLodMode::Zero {
+                    TexDerivMode::DerivXY
+                } else {
+                    TexDerivMode::Auto
+                };
+
             let offset_mode = match flags.offset_mode() {
                 NAK_NIR_OFFSET_MODE_NONE => TexOffsetMode::None,
                 NAK_NIR_OFFSET_MODE_AOFFI => TexOffsetMode::AddOffI,
@@ -1908,12 +1919,14 @@ impl<'a> ShaderFromNir<'a> {
                     channel_mask,
                 });
             } else if tex.op == nir_texop_lod {
+                assert!(lod_mode == TexLodMode::Auto);
                 assert!(offset_mode == TexOffsetMode::None);
                 b.push_op(OpTmml {
                     dsts: dsts,
                     tex: tex_ref,
                     srcs: srcs,
                     dim: dim,
+                    deriv_mode,
                     nodep: flags.nodep(),
                     channel_mask,
                 });
@@ -1955,6 +1968,7 @@ impl<'a> ShaderFromNir<'a> {
                     srcs: srcs,
                     dim: dim,
                     lod_mode: lod_mode,
+                    deriv_mode,
                     z_cmpr: flags.has_z_cmpr(),
                     offset_mode,
                     mem_eviction_priority: MemEvictionPriority::Normal,
@@ -2328,6 +2342,14 @@ impl<'a> ShaderFromNir<'a> {
                         op: ShflOp::Bfly,
                     });
 
+                    // Starting with Blackwell, the shader stage now affects
+                    // fswzadd so we need to use fswzadd.ndv
+                    let deriv_mode = if self.sm.sm() >= 100 {
+                        TexDerivMode::NonDivergent
+                    } else {
+                        TexDerivMode::Auto
+                    };
+
                     b.push_op(OpFSwzAdd {
                         dst: dst.into(),
                         srcs: [scratch.into(), self.get_src(&srcs[0])],
@@ -2339,6 +2361,7 @@ impl<'a> ShaderFromNir<'a> {
                         ],
                         rnd_mode: self.float_ctl[ftype].rnd_mode,
                         ftz: self.float_ctl[ftype].ftz,
+                        deriv_mode,
                     });
                 } else {
                     b.push_op(OpFSwz {
@@ -2352,6 +2375,7 @@ impl<'a> ShaderFromNir<'a> {
                         ],
                         rnd_mode: self.float_ctl[ftype].rnd_mode,
                         ftz: self.float_ctl[ftype].ftz,
+                        deriv_mode: TexDerivMode::Auto,
                         shuffle: FSwzShuffle::SwapHorizontal,
                     });
                 }
@@ -2379,6 +2403,14 @@ impl<'a> ShaderFromNir<'a> {
                         op: ShflOp::Bfly,
                     });
 
+                    // Starting with Blackwell, the shader stage now affects
+                    // fswzadd so we need to use fswzadd.ndv
+                    let deriv_mode = if self.sm.sm() >= 100 {
+                        TexDerivMode::NonDivergent
+                    } else {
+                        TexDerivMode::Auto
+                    };
+
                     b.push_op(OpFSwzAdd {
                         dst: dst.into(),
                         srcs: [scratch.into(), self.get_src(&srcs[0])],
@@ -2390,6 +2422,7 @@ impl<'a> ShaderFromNir<'a> {
                         ],
                         rnd_mode: self.float_ctl[ftype].rnd_mode,
                         ftz: self.float_ctl[ftype].ftz,
+                        deriv_mode,
                     });
                 } else {
                     b.push_op(OpFSwz {
@@ -2403,6 +2436,7 @@ impl<'a> ShaderFromNir<'a> {
                         ],
                         rnd_mode: self.float_ctl[ftype].rnd_mode,
                         ftz: self.float_ctl[ftype].ftz,
+                        deriv_mode: TexDerivMode::Auto,
                         shuffle: FSwzShuffle::SwapVertical,
                     });
                 }

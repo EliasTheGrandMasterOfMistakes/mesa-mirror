@@ -1861,6 +1861,9 @@ ir3_output_conv_type(struct ir3_instruction *instr, bool *can_fold)
    case OPC_MAD_S24:
       return TYPE_S32;
 
+   case OPC_MOVS:
+      return full_type(instr->cat1.src_type);
+
    /* We assume that any move->move folding that could be done was done by
     * NIR.
     */
@@ -2310,7 +2313,7 @@ struct ir3_shader_variant;
 bool ir3_dce(struct ir3 *ir, struct ir3_shader_variant *so);
 
 /* fp16 conversion folding */
-bool ir3_cf(struct ir3 *ir);
+bool ir3_cf(struct ir3 *ir, struct ir3_shader_variant *so);
 
 /* shared mov folding */
 bool ir3_shared_fold(struct ir3 *ir);
@@ -2655,6 +2658,29 @@ ir3_COV_rpt(struct ir3_builder *build, unsigned nrpt,
 
    ir3_instr_create_rpt(dst.rpts, nrpt);
    return dst;
+}
+
+static inline struct ir3_instruction *
+ir3_MOVS(struct ir3_builder *build, struct ir3_instruction *src,
+         struct ir3_instruction *invocation, type_t type)
+{
+   bool use_a0 = writes_addr0(invocation);
+   struct ir3_instruction *instr =
+      ir3_build_instr(build, OPC_MOVS, 1, use_a0 ? 1 : 2);
+   ir3_register_flags flags = type_flags(type);
+
+   __ssa_dst(instr)->flags |= flags | IR3_REG_SHARED;
+   __ssa_src(instr, src, 0);
+
+   if (use_a0) {
+      ir3_instr_set_address(instr, invocation);
+   } else {
+      __ssa_src(instr, invocation, 0);
+   }
+
+   instr->cat1.src_type = type;
+   instr->cat1.dst_type = type;
+   return instr;
 }
 
 static inline struct ir3_instruction *

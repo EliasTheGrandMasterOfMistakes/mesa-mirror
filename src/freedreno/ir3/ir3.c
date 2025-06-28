@@ -1246,6 +1246,7 @@ is_scalar_alu(struct ir3_instruction *instr,
    return instr->opc != OPC_MOVMSK &&
       instr->opc != OPC_SCAN_CLUSTERS_MACRO &&
       instr->opc != OPC_SCAN_MACRO &&
+      instr->opc != OPC_MOVS &&
       is_alu(instr) && (instr->dsts[0]->flags & IR3_REG_SHARED) &&
       /* scalar->scalar mov instructions (but NOT cov) were supported before the
        * scalar ALU was supported, but they still required (ss) whereas on GPUs
@@ -1577,6 +1578,13 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
          else
             return flags == 0;
          break;
+      case OPC_MOVS:
+         if (n == 0) {
+            valid_flags = IR3_REG_SHARED;
+         } else {
+            valid_flags = IR3_REG_IMMED;
+         }
+         break;
       default: {
          valid_flags =
             IR3_REG_IMMED | IR3_REG_CONST | IR3_REG_RELATIV | IR3_REG_SHARED;
@@ -1796,7 +1804,7 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
             return false;
 
          /* as with atomics, these cat6 instrs can only have an immediate
-          * for SSBO/IBO slot argument
+          * for SSBO/UAV slot argument
           */
          switch (instr->opc) {
          case OPC_LDIB:

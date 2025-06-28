@@ -611,6 +611,10 @@
    DRI_CONF_OPT_B(pan_enable_vertex_pipeline_stores_atomics, def, \
                   "Enable vertexPipelineStoresAndAtomics on v13+ (This cannot work on older generation because of speculative behaviors around vertices)")
 
+#define DRI_CONF_PAN_FORCE_ENABLE_SHADER_ATOMICS(def) \
+   DRI_CONF_OPT_B(pan_force_enable_shader_atomics, def, \
+                  "Enable fragmentStoresAndAtomics and vertexPipelineStoresAndAtomics on any architecture. (This may not work reliably and is for debug purposes only!)")
+
 /**
  * \brief Turnip specific configuration options
  */
@@ -787,6 +791,10 @@
 #define DRI_CONF_RADV_DISABLE_HIZ_HIS_GFX12(def) \
    DRI_CONF_OPT_B(radv_disable_hiz_his_gfx12, def, \
                   "Disable HiZ/HiS on GFX12 (RDNA4) to workaround a hw bug that causes random GPU hangs")
+
+#define DRI_CONF_RADV_COOPERATIVE_MATRIX2_NV(def) \
+   DRI_CONF_OPT_B(radv_cooperative_matrix2_nv, def, \
+                  "Expose VK_NV_cooperative_matrix2 on supported hardware.")
 
 /**
  * \brief ANV specific configuration options

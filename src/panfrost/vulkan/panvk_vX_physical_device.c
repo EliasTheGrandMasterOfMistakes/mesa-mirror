@@ -150,6 +150,7 @@ panvk_per_arch(get_physical_device_extensions)(
       .EXT_primitive_topology_list_restart = true,
       .EXT_provoking_vertex = true,
       .EXT_queue_family_foreign = true,
+      .EXT_robustness2 = PAN_ARCH >= 10,
       .EXT_sampler_filter_minmax = PAN_ARCH >= 10,
       .EXT_scalar_block_layout = true,
       .EXT_separate_stencil_usage = true,
@@ -240,7 +241,8 @@ panvk_per_arch(get_physical_device_features)(
       .textureCompressionETC2 = has_texture_compression_etc2(device),
       .textureCompressionASTC_LDR = has_texture_compression_astc_ldr(device),
       .textureCompressionBC = has_texture_compression_bc(device),
-      .fragmentStoresAndAtomics = PAN_ARCH >= 10,
+      .fragmentStoresAndAtomics = (PAN_ARCH >= 10) ||
+          instance->force_enable_shader_atomics,
       .shaderImageGatherExtended = true,
       .shaderStorageImageExtendedFormats = true,
       .shaderStorageImageReadWithoutFormat = true,
@@ -256,7 +258,8 @@ panvk_per_arch(get_physical_device_features)(
       /* On v13+, the hardware isn't speculatively referencing to invalid
          indices anymore. */
       .vertexPipelineStoresAndAtomics =
-         PAN_ARCH >= 13 && instance->enable_vertex_pipeline_stores_atomics,
+         (PAN_ARCH >= 13 && instance->enable_vertex_pipeline_stores_atomics) ||
+         instance->force_enable_shader_atomics,
 
       /* Vulkan 1.1 */
       .storageBuffer16BitAccess = true,
@@ -425,6 +428,11 @@ panvk_per_arch(get_physical_device_features)(
       /* VK_EXT_pipeline_robustness */
       .pipelineRobustness = true,
 
+      /* VK_EXT_robustness2 */
+      .robustBufferAccess2 = false,
+      .robustImageAccess2 = false,
+      .nullDescriptor = PAN_ARCH >= 10,
+
       /* VK_KHR_shader_clock */
       .shaderSubgroupClock = device->kmod.props.gpu_can_query_timestamp,
       .shaderDeviceClock = device->kmod.props.gpu_can_query_timestamp,
@@ -533,11 +541,22 @@ panvk_per_arch(get_physical_device_properties)(
       .deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
 
       /* Vulkan 1.0 limits */
-      /* Maximum texture dimension is 2^16. */
+      /* Maximum texture dimension is 2^16, but we're limited by the
+       * size/surface-stride fields. The size/surface_stride field is 32-bit
+       * on v10-, so let's take that as a reference for now.
+       * The following limits are chosen so we don't overflow these
+       * size/surface_stride fields. We choose them so they are a power-of-two,
+       * except for 2D/Cube dimensions where taking a power-of-two would be
+       * too limiting, so we pick power-of-two-minus-one, which makes things
+       * fit exactly in our 32-bit budget.
+       *
+       * TODO: increase the limit on v11+ once we have all the necessary bits
+       * patched to handle the size/stride field extension.
+       */
       .maxImageDimension1D = (1 << 16),
-      .maxImageDimension2D = (1 << 16),
-      .maxImageDimension3D = (1 << 16),
-      .maxImageDimensionCube = (1 << 16),
+      .maxImageDimension2D = PAN_ARCH <= 10 ? (1 << 14) - 1 : (1 << 16),
+      .maxImageDimension3D = PAN_ARCH <= 10 ? (1 << 9) : (1 << 14),
+      .maxImageDimensionCube = PAN_ARCH <= 10 ? (1 << 14) - 1 : (1 << 16),
       .maxImageArrayLayers = (1 << 16),
       /* Currently limited by the 1D texture size, which is 2^16.
        * TODO: If we expose buffer views as 2D textures, we can increase the
@@ -858,6 +877,10 @@ panvk_per_arch(get_physical_device_properties)(
       .storageTexelBufferOffsetSingleTexelAlignment = false,
       .uniformTexelBufferOffsetAlignmentBytes = 64,
       .uniformTexelBufferOffsetSingleTexelAlignment = false,
+
+      /* VK_EXT_robustness2 */
+      .robustStorageBufferAccessSizeAlignment = 1,
+      .robustUniformBufferAccessSizeAlignment = 1,
 
       /* VK_KHR_maintenance4 */
       .maxBufferSize = 1 << 30,

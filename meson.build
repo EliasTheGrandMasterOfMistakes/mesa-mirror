@@ -6,7 +6,7 @@ project(
   ['c', 'cpp'],
   version : files('VERSION'),
   license : 'MIT',
-  meson_version : '>= 1.3.0',
+  meson_version : '>= 1.4.0',
   default_options : [
     'buildtype=debugoptimized',
     'b_ndebug=if-release',
@@ -95,18 +95,19 @@ with_vulkan_vram_report_limit_layer = get_option('vulkan-layers').contains('vram
 with_tools = get_option('tools')
 if with_tools.contains('all')
   with_tools = [
-    'drm-shim',
+    'asahi',
     'dlclose-skip',
+    'drm-shim',
     'etnaviv',
     'freedreno',
     'glsl',
+    'imagination',
     'intel',
     'intel-ui',
     'lima',
     'nir',
     'nouveau',
-    'asahi',
-    'imagination',
+    'panfrost',
   ]
 endif
 
@@ -269,10 +270,6 @@ with_asahi_vk = _vulkan_drivers.contains('asahi')
 with_gfxstream_vk = _vulkan_drivers.contains('gfxstream')
 with_any_vk = _vulkan_drivers.length() != 0
 
-if with_any_vk and host_machine.system() == 'windows' and meson.version().version_compare('< 1.3')
-  error('Vulkan drivers on Windows require meson 1.3 or newer')
-endif
-
 with_any_llvmpipe = with_gallium_llvmpipe or with_swrast_vk
 with_gallium_or_lvp = with_gallium or with_swrast_vk
 
@@ -290,6 +287,15 @@ if freedreno_kmds.length() != 0 and freedreno_kmds != [ 'msm' ] and with_freedre
     system_has_kms_drm = false
   endif
 endif
+
+with_vdrm = [
+  with_gallium_virgl,
+  with_virtio_vk,
+  with_amdgpu_virtio,
+  freedreno_kmds.contains('virtio'),
+  with_gallium_asahi,
+  with_asahi_vk,
+].contains(true)
 
 with_dri = false
 if with_gallium and system_has_kms_drm
@@ -1908,11 +1914,8 @@ endif
 
 # ThreadSanitizer can't deal with futexes, and reports races for cases we don't care about
 # so add a define to work silence these issues.
-if get_option('b_sanitize') == 'thread'
+if get_option('b_sanitize').contains('thread')
   pre_args += '-DTHREAD_SANITIZER=1'
-  # meson versions prior to 1.4 will warn "Consider using the built-in option for sanitizers ..."
-  # later on because it only checks whether the option starts with "-fsanitize",
-  # but there is no built-in option for adding a blacklist
   tsan_blacklist = '-fsanitize-blacklist=@0@'.format(join_paths(meson.project_source_root(), 'build-support', 'tsan-blacklist.txt'))
   if cc.has_argument(tsan_blacklist)
     pre_args += tsan_blacklist

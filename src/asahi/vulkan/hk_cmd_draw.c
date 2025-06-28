@@ -1145,6 +1145,12 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
          params.xfb_size[i] = gfx->xfb[i].range;
          params.xfb_offs_ptrs[i] = gfx->xfb_offsets + i * sizeof(uint32_t);
       }
+   } else {
+      for (unsigned i = 0; i < ARRAY_SIZE(gfx->xfb); ++i) {
+         params.xfb_offs_ptrs[i] = AGX_ZERO_PAGE_ADDRESS;
+         params.xfb_base_original[i] = AGX_ZERO_PAGE_ADDRESS;
+         params.xfb_size[i] = 0;
+      }
    }
 
    for (unsigned i = 0; i < ARRAY_SIZE(gfx->xfb_query); ++i) {
@@ -1153,8 +1159,17 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       if (q) {
          params.xfb_prims_generated_counter[i] = q;
          params.prims_generated_counter[i] = q + sizeof(uint64_t);
+      } else {
+         params.xfb_prims_generated_counter[i] = AGX_SCRATCH_PAGE_ADDRESS;
+         params.prims_generated_counter[i] = AGX_SCRATCH_PAGE_ADDRESS;
       }
+
+      /* TODO: Optimize out? */
+      params.xfb_overflow[i] = AGX_SCRATCH_PAGE_ADDRESS;
    }
+
+   /* TODO: Optimize out? */
+   params.xfb_any_overflow = AGX_SCRATCH_PAGE_ADDRESS;
 
    /* Calculate input primitive count for direct draws, and allocate the vertex
     * & count buffers. GPU calculates and allocates for indirect draws.
@@ -1184,6 +1199,9 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       if (gsi->shape == AGX_GS_SHAPE_DYNAMIC_INDEXED) {
          cmd->geom_index_buffer = dev->heap->va->addr;
          cmd->geom_index_count = dev->heap->size;
+      } else {
+         cmd->geom_index_count =
+            agx_gs_rast_vertices(gsi->shape, gsi->max_indices, 1, 0);
       }
    } else {
       uint32_t verts = draw.b.count[0], instances = draw.b.count[1];
@@ -1634,7 +1652,7 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       grid_tess = agx_1d(patches * draw.b.count[1]);
 
       /* TCS invocation counter increments once per-patch */
-      if (tcs_stat) {
+      if (hk_stat_enabled(tcs_stat)) {
          perf_debug(cmd, "Direct TCS statistic");
          libagx_increment_statistic(
             cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_PREGFX, tcs_stat, patches);
@@ -2775,8 +2793,8 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          samples_shaded = dyn->ms.rasterization_samples;
 
       struct hk_fast_link_key_fs key = {
-         .prolog.statistics = hk_pipeline_stat_addr(
-            cmd, VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT),
+         .prolog.statistics = hk_stat_enabled(hk_pipeline_stat_addr(
+            cmd, VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT)),
 
          .prolog.cull_distance_size = hw_vs->info.cull_distance_array_size,
          .prolog.api_sample_mask = has_sample_mask ? api_sample_mask : 0xff,
@@ -3047,7 +3065,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
           */
          desc->root.draw.vertex_output_buffer =
             vb_size ? hk_pool_alloc(cmd, vb_size, 4).gpu
-                    : dev->rodata.null_sink;
+                    : AGX_SCRATCH_PAGE_ADDRESS;
       }
    }
 
@@ -3492,8 +3510,10 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
    uint64_t stat_c_prims = hk_pipeline_stat_addr(
       cmd, VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT);
 
-   bool ia_stats = stat_ia_verts || stat_ia_prims || stat_vs_inv ||
-                   stat_c_inv || stat_c_prims;
+   bool ia_stats = hk_stat_enabled(stat_ia_verts) ||
+                   hk_stat_enabled(stat_ia_prims) ||
+                   hk_stat_enabled(stat_vs_inv) ||
+                   hk_stat_enabled(stat_c_inv) || hk_stat_enabled(stat_c_prims);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
    hk_foreach_view(cmd) {

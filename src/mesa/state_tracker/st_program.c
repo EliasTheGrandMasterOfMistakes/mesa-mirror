@@ -841,7 +841,7 @@ st_create_common_variant(struct st_context *st,
       if (state.ir.nir->info.stage == MESA_SHADER_TESS_CTRL &&
           state.ir.nir->options->compact_arrays &&
           state.ir.nir->options->vectorize_tess_levels)
-         NIR_PASS(_, state.ir.nir, nir_vectorize_tess_levels);
+         NIR_PASS(_, state.ir.nir, nir_lower_tess_level_array_vars_to_vec);
 
       gl_nir_opts(state.ir.nir);
       finalize = true;
@@ -877,6 +877,7 @@ st_create_common_variant(struct st_context *st,
 
    if (report_compile_error && state.error_message) {
       *error = state.error_message;
+      FREE(v);
       return NULL;
    }
 
@@ -1241,6 +1242,7 @@ st_create_fp_variant(struct st_context *st,
    variant->base.driver_shader = st_create_nir_shader(st, &state);
    if (report_compile_error && state.error_message) {
       *error = state.error_message;
+      FREE(variant);
       return NULL;
    }
 

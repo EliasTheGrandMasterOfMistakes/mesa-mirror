@@ -106,33 +106,17 @@ hk_get_spirv_options(struct vk_physical_device *vk_pdev,
    };
 }
 
-static bool
-lower_halt_to_return(nir_builder *b, nir_instr *instr, UNUSED void *_data)
-{
-   if (instr->type != nir_instr_type_jump)
-      return false;
-
-   nir_jump_instr *jump = nir_instr_as_jump(instr);
-   if (jump->type != nir_jump_halt)
-      return false;
-
-   assert(b->impl == nir_shader_get_entrypoint(b->shader));
-   jump->type = nir_jump_return;
-   return true;
-}
-
 void
 hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
 {
    /* Must lower before io to temps */
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, nir_lower_terminate_to_demote);
-      NIR_PASS(_, nir, nir_shader_instructions_pass, lower_halt_to_return,
-               nir_metadata_all, NULL);
+      NIR_PASS(_, nir, nir_lower_halt_to_return);
       NIR_PASS(_, nir, nir_lower_returns);
    }
 
-   /* Unroll loops before lowering indirects via nir_lower_io_to_temporaries */
+   /* Unroll loops before lowering indirects via nir_lower_io_vars_to_temporaries */
    UNUSED bool progress = false;
    NIR_PASS(_, nir, nir_lower_global_vars_to_local);
 
@@ -161,7 +145,7 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
     */
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
-   NIR_PASS(_, nir, nir_lower_io_to_temporaries, nir_shader_get_entrypoint(nir),
+   NIR_PASS(_, nir, nir_lower_io_vars_to_temporaries, nir_shader_get_entrypoint(nir),
             true, false);
 
    NIR_PASS(_, nir, nir_lower_global_vars_to_local);
@@ -275,20 +259,133 @@ bounds_check(nir_builder *b, nir_def *data, nir_def *offs, nir_def *bound)
 }
 
 static bool
+is_op(nir_scalar s, nir_op op)
+{
+   return nir_scalar_is_alu(s) && nir_scalar_alu_op(s) == op;
+}
+
+static nir_def *
+check_in_bounds(nir_builder *b, nir_intrinsic_instr *intr)
+{
+   nir_def *offset = intr->src[1].ssa;
+   nir_def *bound = intr->src[2].ssa;
+
+   unsigned bit_size = intr->def.bit_size;
+   assert(bit_size >= 8 && bit_size % 8 == 0);
+   unsigned byte_size = bit_size / 8;
+   unsigned load_size = byte_size * intr->num_components;
+
+   /* Try to bounds check in terms of elements */
+   nir_scalar offset_s = nir_scalar_resolved(offset, 0);
+   if (is_op(offset_s, nir_op_amul)) {
+      nir_scalar srcs[] = {nir_scalar_chase_alu_src(offset_s, 0),
+                           nir_scalar_chase_alu_src(offset_s, 1)};
+      unsigned i = nir_scalar_is_const(srcs[0]) ? 1 : 0;
+      if (nir_scalar_is_const(srcs[1 - i]) &&
+          nir_scalar_as_uint(srcs[1 - i]) == load_size) {
+
+         nir_def *index = nir_channel(b, srcs[i].def, srcs[i].comp);
+         return nir_ult(b, index, nir_udiv_imm(b, bound, load_size));
+      }
+   }
+
+   /* TODO: handle also the iadd(amul) pattern, this is important */
+
+   /* Otherwise bounds check in bytes */
+   nir_def *sat_offset = nir_umin_imm(b, offset, UINT32_MAX - (load_size - 1));
+   return nir_ult(b, nir_iadd_imm(b, sat_offset, load_size - 1), bound);
+}
+
+static nir_def *
+bound_offset(nir_builder *b, nir_def *valid, nir_scalar offset)
+{
+   /* If we can, clamp the source of an amul instead of the result, to remain
+    * compatible with the hardware address mode.
+    */
+   if (is_op(offset, nir_op_amul)) {
+      nir_scalar srcs[] = {
+         nir_scalar_chase_alu_src(offset, 0),
+         nir_scalar_chase_alu_src(offset, 1),
+      };
+      unsigned i = nir_scalar_is_const(srcs[0]) ? 1 : 0;
+      nir_def *x = nir_channel(b, srcs[i].def, srcs[i].comp);
+      nir_def *y = nir_channel(b, srcs[1 - i].def, srcs[1 - i].comp);
+
+      return nir_amul(b, nir_bcsel(b, valid, x, nir_imm_int(b, 0)), y);
+   }
+
+   /* Similar case for when there's an addition (chain) in the way */
+   if (is_op(offset, nir_op_iadd)) {
+      nir_scalar x = nir_scalar_chase_alu_src(offset, 0);
+      nir_scalar y = nir_scalar_chase_alu_src(offset, 1);
+
+      if (is_op(x, nir_op_amul) || is_op(y, nir_op_amul)) {
+         return nir_iadd(b, bound_offset(b, valid, x),
+                         bound_offset(b, valid, y));
+      }
+   }
+
+   nir_def *def = nir_channel(b, offset.def, offset.comp);
+
+   /* If the offset fits within the zero page, clamping is pointless */
+   if (nir_scalar_is_const(offset) &&
+       (nir_scalar_as_uint(offset) + 16) < AGX_ZERO_PAGE_SIZE)
+      return def;
+
+   /* Otherwise, fallback on clamping the offset */
+   return nir_bcsel(b, valid, def, nir_imm_int(b, 0));
+}
+
+static void
+lower_load_global_bounded(nir_builder *b, nir_intrinsic_instr *intr)
+{
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *base = intr->src[0].ssa;
+   nir_def *offset = intr->src[1].ssa;
+
+   /* Bounds check compatibly with the hardware address mode */
+   nir_def *valid = check_in_bounds(b, intr);
+   base = nir_bcsel(b, valid, base, nir_imm_int64(b, AGX_ZERO_PAGE_ADDRESS));
+   offset = bound_offset(b, valid, nir_scalar_resolved(offset, 0));
+
+   enum gl_access_qualifier access = nir_intrinsic_access(intr);
+
+   if (intr->intrinsic == nir_intrinsic_load_global_constant_bounded) {
+      access |= ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER;
+   }
+
+   nir_def *val = nir_build_load_global(
+      b, intr->def.num_components, intr->def.bit_size,
+      nir_iadd(b, base, nir_u2u64(b, offset)),
+      .align_mul = nir_intrinsic_align_mul(intr),
+      .align_offset = nir_intrinsic_align_offset(intr), .access = access);
+
+   nir_def_replace(&intr->def, val);
+}
+
+static bool
 lower_load_global_constant_offset_instr(nir_builder *b,
                                         nir_intrinsic_instr *intrin, void *data)
 {
+   bool *has_soft_fault = data;
+
+   if (intrin->intrinsic == nir_intrinsic_load_global_bounded ||
+       (intrin->intrinsic == nir_intrinsic_load_global_constant_bounded &&
+        !(*has_soft_fault))) {
+
+      lower_load_global_bounded(b, intrin);
+      return true;
+   }
+
    if (intrin->intrinsic != nir_intrinsic_load_global_constant_offset &&
        intrin->intrinsic != nir_intrinsic_load_global_constant_bounded)
       return false;
 
    b->cursor = nir_before_instr(&intrin->instr);
-   bool *has_soft_fault = data;
 
    nir_def *base_addr = intrin->src[0].ssa;
    nir_def *offset = intrin->src[1].ssa;
    nir_def *bound = NULL;
-   nir_def *zero = NULL;
 
    unsigned bit_size = intrin->def.bit_size;
    assert(bit_size >= 8 && bit_size % 8 == 0);
@@ -297,20 +394,6 @@ lower_load_global_constant_offset_instr(nir_builder *b,
 
    if (intrin->intrinsic == nir_intrinsic_load_global_constant_bounded) {
       bound = intrin->src[2].ssa;
-      zero = nir_imm_zero(b, intrin->num_components, bit_size);
-
-      nir_def *sat_offset =
-         nir_umin(b, offset, nir_imm_int(b, UINT32_MAX - (load_size - 1)));
-      nir_def *in_bounds =
-         nir_ilt(b, nir_iadd_imm(b, sat_offset, load_size - 1), bound);
-
-      /* If we do not have soft fault, we branch to bounds check. This is slow,
-       * fortunately we always have soft fault for release drivers.
-       *
-       * With soft fault, we speculatively load and smash to zero at the end.
-       */
-      if (!(*has_soft_fault))
-         nir_push_if(b, in_bounds);
    }
 
    unsigned align_mul = nir_intrinsic_align_mul(intrin);
@@ -322,47 +405,41 @@ lower_load_global_constant_offset_instr(nir_builder *b,
       .align_offset = align_offset, .access = nir_intrinsic_access(intrin));
 
    if (intrin->intrinsic == nir_intrinsic_load_global_constant_bounded) {
-      if (*has_soft_fault) {
-         nir_scalar offs = nir_scalar_resolved(offset, 0);
-         if (nir_scalar_is_const(offs)) {
-            /* Calculate last byte loaded */
-            unsigned offs_imm = nir_scalar_as_uint(offs) + load_size;
+      nir_scalar offs = nir_scalar_resolved(offset, 0);
+      if (nir_scalar_is_const(offs)) {
+         /* Calculate last byte loaded */
+         unsigned offs_imm = nir_scalar_as_uint(offs) + load_size;
 
-            /* Simplify the bounds check. Uniform buffers are bounds checked at
-             * 64B granularity, so `bound` is a multiple of K = 64. Then
-             *
-             * offs_imm < bound <==> round_down(offs_imm, K) < bound. Proof:
-             *
-             * "=>" round_down(offs_imm, K) <= offs_imm < bound.
-             *
-             * "<=" Let a, b be integer s.t. offs_imm = K a + b with b < K.
-             *      Note round_down(offs_imm, K) = Ka.
-             *
-             *      Let c be integer s.t. bound = Kc.
-             *      We have Ka < Kc => a < c.
-             *      b < K => Ka + b < K(a + 1).
-             *
-             *      a < c with integers => a + 1 <= c.
-             *      offs_imm < K(a + 1) <= Kc = bound.
-             *      Hence offs_imm < bound.
-             */
-            assert(align_mul == 64);
-            offs_imm &= ~(align_mul - 1);
+         /* Simplify the bounds check. Uniform buffers are bounds checked at
+          * 64B granularity, so `bound` is a multiple of K = 64. Then
+          *
+          * offs_imm < bound <==> round_down(offs_imm, K) < bound. Proof:
+          *
+          * "=>" round_down(offs_imm, K) <= offs_imm < bound.
+          *
+          * "<=" Let a, b be integer s.t. offs_imm = K a + b with b < K.
+          *      Note round_down(offs_imm, K) = Ka.
+          *
+          *      Let c be integer s.t. bound = Kc.
+          *      We have Ka < Kc => a < c.
+          *      b < K => Ka + b < K(a + 1).
+          *
+          *      a < c with integers => a + 1 <= c.
+          *      offs_imm < K(a + 1) <= Kc = bound.
+          *      Hence offs_imm < bound.
+          */
+         assert(align_mul == 64);
+         offs_imm &= ~(align_mul - 1);
 
-            /* Bounds checks are `offset > bound ? 0 : val` so if offset = 0,
-             * the bounds check is useless.
-             */
-            if (offs_imm) {
-               val = bounds_check(b, val, nir_imm_int(b, offs_imm), bound);
-            }
-         } else {
-            offset = nir_iadd_imm(b, offset, load_size);
-            val = bounds_check(b, val, offset, bound);
+         /* Bounds checks are `offset > bound ? 0 : val` so if offset = 0,
+          * the bounds check is useless.
+          */
+         if (offs_imm) {
+            val = bounds_check(b, val, nir_imm_int(b, offs_imm), bound);
          }
-
       } else {
-         nir_pop_if(b, NULL);
-         val = nir_if_phi(b, val, zero);
+         offset = nir_iadd_imm(b, offset, load_size);
+         val = bounds_check(b, val, offset, bound);
       }
    }
 
@@ -745,6 +822,10 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(progress, nir, nir_copy_prop);
       NIR_PASS(progress, nir, nir_opt_dce);
    } while (progress);
+
+   nir_move_options opts = nir_move_load_ssbo | nir_move_load_ubo;
+   NIR_PASS(progress, nir, nir_opt_sink, opts);
+   NIR_PASS(progress, nir, nir_opt_move, opts);
 
    bool soft_fault = agx_has_soft_fault(&dev->dev);
    NIR_PASS(_, nir, nir_shader_intrinsics_pass,

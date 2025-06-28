@@ -1144,7 +1144,7 @@ elk_nir_link_shaders(const struct elk_compiler *compiler,
 {
    const struct intel_device_info *devinfo = compiler->devinfo;
 
-   nir_lower_io_arrays_to_elements(producer, consumer);
+   nir_lower_io_array_vars_to_elements(producer, consumer);
    nir_validate_shader(producer, "after nir_lower_io_arrays_to_elements");
    nir_validate_shader(consumer, "after nir_lower_io_arrays_to_elements");
 
@@ -1152,8 +1152,8 @@ elk_nir_link_shaders(const struct elk_compiler *compiler,
    const bool c_is_scalar = compiler->scalar_stage[consumer->info.stage];
 
    if (p_is_scalar && c_is_scalar) {
-      NIR_PASS(_, producer, nir_lower_io_to_scalar_early, nir_var_shader_out);
-      NIR_PASS(_, consumer, nir_lower_io_to_scalar_early, nir_var_shader_in);
+      NIR_PASS(_, producer, nir_lower_io_vars_to_scalar, nir_var_shader_out);
+      NIR_PASS(_, consumer, nir_lower_io_vars_to_scalar, nir_var_shader_in);
       elk_nir_optimize(producer, p_is_scalar, devinfo);
       elk_nir_optimize(consumer, c_is_scalar, devinfo);
    }
@@ -1192,23 +1192,23 @@ elk_nir_link_shaders(const struct elk_compiler *compiler,
       elk_nir_optimize(consumer, c_is_scalar, devinfo);
    }
 
-   NIR_PASS(_, producer, nir_lower_io_to_vector, nir_var_shader_out);
+   NIR_PASS(_, producer, nir_opt_vectorize_io_vars, nir_var_shader_out);
 
    if (producer->info.stage == MESA_SHADER_TESS_CTRL &&
        producer->options->vectorize_tess_levels)
-   NIR_PASS_V(producer, nir_vectorize_tess_levels);
+   NIR_PASS_V(producer, nir_lower_tess_level_array_vars_to_vec);
 
    NIR_PASS(_, producer, nir_opt_combine_stores, nir_var_shader_out);
-   NIR_PASS(_, consumer, nir_lower_io_to_vector, nir_var_shader_in);
+   NIR_PASS(_, consumer, nir_opt_vectorize_io_vars, nir_var_shader_in);
 
    if (producer->info.stage != MESA_SHADER_TESS_CTRL) {
       /* Calling lower_io_to_vector creates output variable writes with
        * write-masks.  On non-TCS outputs, the back-end can't handle it and we
-       * need to call nir_lower_io_to_temporaries to get rid of them.  This,
+       * need to call nir_lower_io_vars_to_temporaries to get rid of them.  This,
        * in turn, creates temporary variables and extra copy_deref intrinsics
        * that we need to clean up.
        */
-      NIR_PASS_V(producer, nir_lower_io_to_temporaries,
+      NIR_PASS_V(producer, nir_lower_io_vars_to_temporaries,
                  nir_shader_get_entrypoint(producer), true, false);
       NIR_PASS(_, producer, nir_lower_global_vars_to_local);
       NIR_PASS(_, producer, nir_split_var_copies);

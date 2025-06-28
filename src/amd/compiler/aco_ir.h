@@ -2152,6 +2152,8 @@ public:
    /* Private segment buffers and scratch offsets. One entry per start/resume block */
    aco::small_vec<Temp, 2> private_segment_buffers;
    aco::small_vec<Temp, 2> scratch_offsets;
+   Temp static_scratch_rsrc;
+   Temp stack_ptr;
 
    uint16_t num_waves = 0;
    uint16_t min_waves = 0;
@@ -2354,6 +2356,9 @@ uint16_t get_vgpr_alloc(Program* program, uint16_t addressable_vgprs);
 RegisterDemand get_addr_regs_from_waves(Program* program, uint16_t waves);
 
 bool uses_scratch(Program* program);
+
+Temp load_scratch_resource(Program* program, Builder& bld, unsigned resume_idx,
+                           bool apply_scratch_offset);
 
 inline bool
 dominates_logical(const Block& parent, const Block& child)

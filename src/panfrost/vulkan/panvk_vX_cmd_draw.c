@@ -8,6 +8,7 @@
 #include "panvk_buffer.h"
 #include "panvk_cmd_buffer.h"
 #include "panvk_cmd_meta.h"
+#include "panvk_device_memory.h"
 #include "panvk_entrypoints.h"
 
 #include "pan_desc.h"
@@ -66,7 +67,7 @@ render_state_set_color_attachment(struct panvk_cmd_buffer *cmdbuf,
    state->render.color_attachments.samples[index] = img->vk.samples;
 
 #if PAN_ARCH < 9
-   state->render.fb.bos[state->render.fb.bo_count++] = img->bo;
+   state->render.fb.bos[state->render.fb.bo_count++] = img->mem->bo;
 #endif
 
    fbinfo->rts[index].view = &iview->pview;
@@ -107,7 +108,7 @@ render_state_set_z_attachment(struct panvk_cmd_buffer *cmdbuf,
       container_of(iview->vk.image, struct panvk_image, vk);
 
 #if PAN_ARCH < 9
-   state->render.fb.bos[state->render.fb.bo_count++] = img->bo;
+   state->render.fb.bos[state->render.fb.bo_count++] = img->mem->bo;
 #endif
 
    state->render.z_attachment.fmt = iview->vk.format;
@@ -171,7 +172,7 @@ render_state_set_s_attachment(struct panvk_cmd_buffer *cmdbuf,
       container_of(iview->vk.image, struct panvk_image, vk);
 
 #if PAN_ARCH < 9
-   state->render.fb.bos[state->render.fb.bo_count++] = img->bo;
+   state->render.fb.bos[state->render.fb.bo_count++] = img->mem->bo;
 #endif
 
    state->render.s_attachment.fmt = iview->vk.format;
@@ -872,10 +873,15 @@ panvk_per_arch(CmdBindVertexBuffers2)(VkCommandBuffer commandBuffer,
    for (uint32_t i = 0; i < bindingCount; i++) {
       VK_FROM_HANDLE(panvk_buffer, buffer, pBuffers[i]);
 
-      cmdbuf->state.gfx.vb.bufs[firstBinding + i].address =
-         panvk_buffer_gpu_ptr(buffer, pOffsets[i]);
-      cmdbuf->state.gfx.vb.bufs[firstBinding + i].size = panvk_buffer_range(
-         buffer, pOffsets[i], pSizes ? pSizes[i] : VK_WHOLE_SIZE);
+      if (buffer) {
+         cmdbuf->state.gfx.vb.bufs[firstBinding + i].address =
+            panvk_buffer_gpu_ptr(buffer, pOffsets[i]);
+         cmdbuf->state.gfx.vb.bufs[firstBinding + i].size = panvk_buffer_range(
+            buffer, pOffsets[i], pSizes ? pSizes[i] : VK_WHOLE_SIZE);
+      } else {
+         cmdbuf->state.gfx.vb.bufs[firstBinding + i].address = 0;
+         cmdbuf->state.gfx.vb.bufs[firstBinding + i].size = 0;
+      }
    }
 
    cmdbuf->state.gfx.vb.count =
@@ -899,15 +905,18 @@ panvk_per_arch(CmdBindIndexBuffer2)(VkCommandBuffer commandBuffer,
       cmdbuf->state.gfx.ib.host_addr =
          buf && buf->host_ptr ? buf->host_ptr + offset : NULL;
 #endif
-      cmdbuf->state.gfx.ib.index_size = vk_index_type_to_bytes(indexType);
    } else {
       cmdbuf->state.gfx.ib.size = 0;
-      cmdbuf->state.gfx.ib.dev_addr = 0;
+      /* In case of NullDescriptors, we need to set a non-NULL address and rely
+       * on out-of-bounds behavior against the zero size of the buffer. Note
+       * that this only works for v10+, as v9 does not have a way to specify the
+       * index buffer size. */
+      cmdbuf->state.gfx.ib.dev_addr = PAN_ARCH >= 10 ? 0x1000 : 0;
 #if PAN_ARCH < 9
       cmdbuf->state.gfx.ib.host_addr = 0;
 #endif
-      cmdbuf->state.gfx.ib.index_size = 0;
    }
+   cmdbuf->state.gfx.ib.index_size = vk_index_type_to_bytes(indexType);
 
    gfx_state_set_dirty(cmdbuf, IB);
 }

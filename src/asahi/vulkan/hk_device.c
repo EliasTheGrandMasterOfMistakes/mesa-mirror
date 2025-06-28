@@ -60,16 +60,8 @@ hk_upload_rodata(struct hk_device *dev)
    dev->rodata.bo =
       agx_bo_create(&dev->dev, AGX_SAMPLER_LENGTH, 0, 0, "Read only data");
 
-   dev->sparse.write =
-      agx_bo_create(&dev->dev, AIL_PAGESIZE, 0, 0, "Sparse write page");
-
-   if (!dev->rodata.bo || !dev->sparse.write)
+   if (!dev->rodata.bo)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
-
-   /* The contents of sparse.write are undefined, but making them nonzero helps
-    * fuzz for bugs where we incorrectly read from the write section.
-    */
-   memset(agx_bo_map(dev->sparse.write), 0xCA, AIL_PAGESIZE);
 
    uint8_t *map = agx_bo_map(dev->rodata.bo);
    uint32_t offs = 0;
@@ -109,14 +101,6 @@ hk_upload_rodata(struct hk_device *dev)
    offs = align(offs, sizeof(uint64_t));
    dev->rodata.heap = dev->rodata.bo->va->addr + offs;
    offs += sizeof(struct agx_heap);
-
-   /* For null storage descriptors, we need to reserve 16 bytes to catch writes.
-    * No particular content is required; we cannot get robustness2 semantics
-    * without more work.
-    */
-   offs = align(offs, 16);
-   dev->rodata.null_sink = dev->rodata.bo->va->addr + offs;
-   offs += 16;
 
    return VK_SUCCESS;
 }
@@ -305,7 +289,7 @@ hk_upload_null_descriptors(struct hk_device *dev)
    uint32_t offset_tex, offset_pbe;
 
    agx_set_null_texture(&null_tex);
-   agx_set_null_pbe(&null_pbe, dev->rodata.null_sink);
+   agx_set_null_pbe(&null_pbe);
 
    hk_descriptor_table_add(dev, &dev->images, &null_tex, sizeof(null_tex),
                            &offset_tex);
@@ -507,7 +491,6 @@ fail_queue:
    hk_queue_finish(dev, &dev->queue);
 fail_rodata:
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
-   agx_bo_unreference(&dev->dev, dev->sparse.write);
 fail_bg_eot:
    agx_bg_eot_cleanup(&dev->bg_eot);
 fail_internal_shaders_2:
@@ -564,7 +547,6 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    hk_descriptor_table_finish(dev, &dev->images);
    hk_descriptor_table_finish(dev, &dev->occlusion_queries);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
-   agx_bo_unreference(&dev->dev, dev->sparse.write);
    agx_bo_unreference(&dev->dev, dev->heap);
    agx_bg_eot_cleanup(&dev->bg_eot);
    agx_close_device(&dev->dev);

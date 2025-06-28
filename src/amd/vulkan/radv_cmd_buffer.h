@@ -216,6 +216,11 @@ struct radv_rendering_state {
    VkExtent2D vrs_texel_size;
 };
 
+struct radv_push_descriptor_set {
+   struct radv_descriptor_set_header set;
+   uint32_t capacity;
+};
+
 struct radv_descriptor_state {
    struct radv_descriptor_set *sets[MAX_SETS];
    uint32_t dirty;
@@ -528,7 +533,7 @@ struct radv_enc_state {
    bool emulation_prevention;
    bool is_even_frame;
    unsigned task_id;
-   uint32_t copy_start_offset;
+   uint32_t *copy_start;
 };
 
 struct radv_cmd_buffer_upload {

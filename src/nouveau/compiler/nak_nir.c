@@ -299,7 +299,7 @@ nak_preprocess_nir(nir_shader *nir, const struct nak_compiler *nak)
 
    nir_validate_ssa_dominance(nir, "before nak_preprocess_nir");
 
-   OPT(nir, nir_lower_io_to_temporaries,
+   OPT(nir, nir_lower_io_vars_to_temporaries,
        nir_shader_get_entrypoint(nir),
        true /* outputs */, false /* inputs */);
 
@@ -309,7 +309,7 @@ nak_preprocess_nir(nir_shader *nir, const struct nak_compiler *nak)
       .lower_txd_clamp = true,
       .lower_txd_shadow = true,
       .lower_txp = ~0,
-      /* TODO: More lowering */
+      .lower_invalid_implicit_lod = true,
    };
    OPT(nir, nir_lower_tex, &tex_options);
    OPT(nir, nir_normalize_cubemap_coords);
